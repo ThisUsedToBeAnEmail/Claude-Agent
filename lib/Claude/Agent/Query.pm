@@ -8,12 +8,14 @@ use Types::Common -types;
 use Marlin
     'prompt!',                                     # Required prompt (string or async generator)
     'options' => sub { Claude::Agent::Options->new() },
-    '_loop==.',                                    # IO::Async loop (rw, no init_arg)
+    'loop?',                                       # Optional external IO::Async loop
+    '_loop==.',                                    # Internal loop reference (rw, no init_arg)
     '_process==.',                                 # IO::Async::Process handle
     '_stdin==.',                                   # stdin pipe for sending messages
     '_messages==.' => sub { [] },                  # Message queue
+    '_pending_futures==.' => sub { [] },           # Futures waiting for messages
     '_session_id==.',                              # Session ID from init message
-    '_finished==.' => sub { 0 },                    # Process finished flag
+    '_finished==.' => sub { 0 },                   # Process finished flag
     '_error==.',                                   # Error message if process failed
     '_jsonl==.' => sub {
         JSON::Lines->new(
@@ -28,6 +30,7 @@ use Marlin
 
 use IO::Async::Loop;
 use IO::Async::Process;
+use Future;
 use Future::AsyncAwait;
 use JSON::Lines;
 use Try::Tiny;
@@ -66,11 +69,37 @@ Claude::Agent::Query - Query iterator for Claude Agent SDK
 This module handles communication with the Claude CLI process and provides
 both blocking and async iteration over response messages.
 
+=head1 CONSTRUCTOR
+
+    my $query = Claude::Agent::Query->new(
+        prompt  => "Find all TODO comments",
+        options => $options,
+        loop    => $loop,    # optional, for async integration
+    );
+
+=head2 Arguments
+
+=over 4
+
+=item * prompt - Required. The prompt to send to Claude.
+
+=item * options - Optional. A Claude::Agent::Options object.
+
+=item * loop - Optional. An IO::Async::Loop for async integration.
+If not provided, a new loop is created internally.
+
+=back
+
+B<Important:> For proper async behavior, pass your application's event loop.
+This allows C<next_async> to be truly event-driven instead of polling.
+
 =cut
 
 sub BUILD {
     my ($self) = @_;
-    $self->_loop(IO::Async::Loop->new);
+    # Use provided loop or create a new one
+    # For proper async, callers should pass their own loop
+    $self->_loop($self->loop // IO::Async::Loop->new);
     $self->_start_process();
 }
 
@@ -242,11 +271,15 @@ sub _start_process {
             if ($exitcode != 0) {
                 $self->_error("Claude CLI exited with code $exitcode");
             }
+            # Resolve any pending async futures
+            $self->_resolve_pending_futures_on_finish();
         },
         on_exception => sub {
             my ($proc, $exception, $errno, $exitcode) = @_;
             $self->_finished(1);
             $self->_error("Claude CLI exception: $exception");
+            # Resolve any pending async futures
+            $self->_resolve_pending_futures_on_finish();
         },
     );
 
@@ -281,7 +314,23 @@ sub _handle_line {
             $self->_session_id($msg->get_session_id);
         }
 
-        push @{$self->_messages}, $msg;
+        # If there's a pending future waiting for a message, resolve it directly
+        if (@{$self->_pending_futures}) {
+            my $future = shift @{$self->_pending_futures};
+            $future->done($msg);
+        }
+        else {
+            # Otherwise queue it for next() or next_async()
+            push @{$self->_messages}, $msg;
+        }
+    }
+}
+
+sub _resolve_pending_futures_on_finish {
+    my ($self) = @_;
+    # Resolve any pending futures with undef when process finishes
+    while (my $future = shift @{$self->_pending_futures}) {
+        $future->done(undef);
     }
 }
 
@@ -311,22 +360,28 @@ sub next {
 
     my $msg = await $query->next_async;
 
-Async call to get the next message. Returns a Future.
+Async call to get the next message. Returns a Future that resolves when
+a message is available. This is truly event-driven - no polling.
 
 =cut
 
-async sub next_async {
+sub next_async {
     my ($self) = @_;
 
-    # Return queued messages first
-    return shift @{$self->_messages} if @{$self->_messages};
-
-    # Wait for more messages or process to finish
-    while (!@{$self->_messages} && !$self->_finished) {
-        await $self->_loop->delay_future(after => 0.01);
+    # Return queued messages first (as an immediately-resolved Future)
+    if (@{$self->_messages}) {
+        return Future->done(shift @{$self->_messages});
     }
 
-    return shift @{$self->_messages};
+    # If already finished, return undef
+    if ($self->_finished) {
+        return Future->done(undef);
+    }
+
+    # Create a Future that will be resolved when next message arrives
+    my $future = $self->_loop->new_future;
+    push @{$self->_pending_futures}, $future;
+    return $future;
 }
 
 =head2 session_id

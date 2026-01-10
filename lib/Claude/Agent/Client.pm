@@ -7,6 +7,7 @@ use warnings;
 use Types::Common -types;
 use Marlin
     'options'      => sub { Claude::Agent::Options->new() },
+    'loop?',                                       # Optional external IO::Async loop
     '_query==.',
     '_session_id==.',
     '_connected==' => sub { 0 };
@@ -86,6 +87,7 @@ sub connect {
         Claude::Agent::Query->new(
             prompt  => $prompt,
             options => $self->options,
+            ($self->has_loop ? (loop => $self->loop) : ()),
         )
     );
 
@@ -259,6 +261,7 @@ sub resume {
         Claude::Agent::Query->new(
             prompt  => $prompt,
             options => $resume_opts,
+            ($self->has_loop ? (loop => $self->loop) : ()),
         )
     );
 

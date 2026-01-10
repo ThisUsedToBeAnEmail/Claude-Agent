@@ -10,6 +10,7 @@ my %WriteMakefileArgs = (
     ABSTRACT         => 'Perl SDK for the Claude Agent SDK',
     LICENSE          => 'artistic_2',
     MIN_PERL_VERSION => '5.020',
+    macro => { TARFLAGS   => "--format=ustar -c -v -f" },
     CONFIGURE_REQUIRES => {
         'ExtUtils::MakeMaker' => '0',
     },

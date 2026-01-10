@@ -1,5 +1,13 @@
 Revision history for Claude-Agent
 
-0.01    Date/time
+0.02    2026-01-10
+        - Async improvements: truly event-driven next_async() instead of polling
+        - Added 'loop' parameter to query(), Client, and Query for shared event loops
+        - Futures now resolve when messages arrive, not via delay_future polling
+        - Added _pending_futures queue for proper async message delivery
+        - Updated documentation and examples for proper async usage
+        - Added structured_output field normalization for Result messages
+
+0.01    2026-01-09
         First version, released on an unsuspecting world.
 

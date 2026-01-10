@@ -19,11 +19,11 @@ Claude::Agent - Perl SDK for the Claude Agent SDK
 
 =head1 VERSION
 
-Version 0.01
+Version 0.02
 
 =cut
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 
 =head1 SYNOPSIS
 
@@ -52,12 +52,18 @@ our $VERSION = '0.01';
     use IO::Async::Loop;
     use Future::AsyncAwait;
 
+    my $loop = IO::Async::Loop->new;
+
     async sub run_agent {
+        my ($loop) = @_;
+
+        # Pass the loop for proper async integration
         my $iter = query(
             prompt  => "Analyze this codebase",
             options => Claude::Agent::Options->new(
                 allowed_tools => ['Read', 'Glob', 'Grep'],
             ),
+            loop => $loop,
         );
 
         while (my $msg = await $iter->next_async) {
@@ -68,7 +74,7 @@ our $VERSION = '0.01';
         }
     }
 
-    IO::Async::Loop->new->run_until(run_agent());
+    run_agent($loop)->get;
 
 =head1 DESCRIPTION
 
@@ -103,6 +109,7 @@ The SDK communicates with the Claude CLI and provides:
     my $iter = query(
         prompt  => $prompt,
         options => $options,
+        loop    => $loop,      # optional, for async integration
     );
 
 Creates a new query and returns an iterator for streaming messages.
@@ -115,11 +122,16 @@ Creates a new query and returns an iterator for streaming messages.
 
 =item * options - A L<Claude::Agent::Options> object (optional)
 
+=item * loop - An L<IO::Async::Loop> object (optional, for async integration)
+
 =back
 
 =head3 Returns
 
 A L<Claude::Agent::Query> object that can be iterated to receive messages.
+
+B<Note:> For proper async behavior, pass your application's IO::Async::Loop.
+This allows multiple queries to share the same event loop.
 
 =cut
 
@@ -134,6 +146,7 @@ sub query {
     return Claude::Agent::Query->new(
         prompt  => $prompt,
         options => $options,
+        ($args{loop} ? (loop => $args{loop}) : ()),
     );
 }
 

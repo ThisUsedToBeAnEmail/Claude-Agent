@@ -16,12 +16,13 @@ use Claude::Agent::Options;
 use IO::Async::Loop;
 use Future::AsyncAwait;
 
-# Create the event loop
+# Create the event loop - ONE loop for the entire application
 my $loop = IO::Async::Loop->new;
 
 # Async function to run a query
+# Note: Pass the loop for proper async integration
 async sub run_query {
-    my ($prompt) = @_;
+    my ($loop, $prompt) = @_;
 
     my $options = Claude::Agent::Options->new(
         allowed_tools   => ['Read', 'Glob', 'Grep'],
@@ -29,14 +30,16 @@ async sub run_query {
         max_turns       => 3,
     );
 
+    # Pass the loop so the query integrates with our event loop
     my $iter = query(
         prompt  => $prompt,
         options => $options,
+        loop    => $loop,
     );
 
     my $result_text = '';
 
-    # Use async iteration
+    # Use async iteration - truly event-driven, no polling
     while (my $msg = await $iter->next_async) {
         if ($msg->isa('Claude::Agent::Message::Assistant')) {
             for my $block (@{$msg->content_blocks}) {
@@ -58,7 +61,7 @@ async sub main {
     say "Starting async query...";
     say "-" x 50;
 
-    my $result = await run_query('What is 2 + 2? Answer in one word.');
+    my $result = await run_query($loop, 'What is 2 + 2? Answer in one word.');
 
     say "Result: $result";
     say "-" x 50;
