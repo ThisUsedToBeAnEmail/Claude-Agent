@@ -187,7 +187,7 @@ subtest 'Assistant message edge cases' => sub {
     is(ref($blocks), 'ARRAY', 'content_blocks returns array with hash content');
     is(scalar @$blocks, 0, 'content_blocks is empty with hash content');
 
-    # Test caching behavior
+    # Test caching behavior - returns shallow copy but content is equivalent
     $msg = Claude::Agent::Message::Assistant->new(
         type       => 'assistant',
         uuid       => 'uuid-4',
@@ -199,7 +199,9 @@ subtest 'Assistant message edge cases' => sub {
     );
     my $blocks1 = $msg->content_blocks;
     my $blocks2 = $msg->content_blocks;
-    ok($blocks1 == $blocks2, 'content_blocks returns cached result on second call');
+    is(scalar @$blocks1, scalar @$blocks2, 'content_blocks returns same count on multiple calls');
+    # Objects inside are shared (shallow copy)
+    ok($blocks1->[0] == $blocks2->[0], 'content_blocks shares Content objects between calls');
 };
 
 # =============================================================================

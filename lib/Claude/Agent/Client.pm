@@ -180,11 +180,22 @@ sub receive_until_result {
     my ($self) = @_;
 
     my @messages;
+    my $max_iterations = 10000;  # Prevent infinite loops on unexpected disconnection
+    my $iterations = 0;
     while (my $msg = $self->receive) {
         push @messages, $msg;
         last if $msg->isa('Claude::Agent::Message::Result');
+        $iterations++;
+        if ($iterations >= $max_iterations) {
+            warn "receive_until_result: exceeded max iterations ($max_iterations), breaking loop\n";
+            last;
+        }
     }
-
+    # Check if we exited without a Result (connection dropped)
+    if (@messages && !$messages[-1]->isa('Claude::Agent::Message::Result')) {
+        warn "receive_until_result: connection closed without Result message\n"
+            if $ENV{CLAUDE_AGENT_DEBUG};
+    }
     return wantarray ? @messages : \@messages;
 }
 
@@ -205,7 +216,37 @@ sub send {
     Claude::Agent::Error->throw(message => 'Query has finished')
         if $self->_query->is_finished;
 
-    $self->_query->send_user_message($content);
+    # Attempt to send the message, catching write errors gracefully
+    # In async contexts, the query may finish between the check above and the write
+    require Try::Tiny;
+    my $write_error;
+    my $original_exception;
+    Try::Tiny::try {
+        $self->_query->send_user_message($content);
+    }
+    Try::Tiny::catch {
+        $original_exception = $_;
+        # Stringify for logging but preserve original for re-throw
+        $write_error = ref($_) ? "$_" : $_;
+        warn "Client::send write error: $write_error\n" if $ENV{CLAUDE_AGENT_DEBUG};
+    };
+
+    # If write failed and query is now finished, throw appropriate error
+    if ($write_error) {
+        if ($self->_query->is_finished) {
+            Claude::Agent::Error->throw(message => 'Query finished during send');
+        }
+        # Re-throw original exception if it's an object to preserve stack trace and type
+        # Otherwise create a new error with the message
+        if (ref($original_exception) && $original_exception->can('throw')) {
+            $original_exception->throw();
+        }
+        Claude::Agent::Error->throw(
+            message => "Send failed: $write_error",
+            ($original_exception ? (cause => $original_exception) : ()),
+        );
+    }
+
     return $self;
 }
 

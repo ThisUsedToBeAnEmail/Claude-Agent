@@ -145,9 +145,10 @@ sub _find_claude_cli {
     );
     # Add HOME-based paths only if HOME is a valid absolute path without traversal
     if ($ENV{HOME} && $ENV{HOME} =~ m{^/}) {
-        my $home = File::Spec->canonpath($ENV{HOME});
-        # Reject if canonicalized path still contains traversal sequences
-        if ($home !~ m{/\.\./} && $home !~ m{/\.\.\z}) {
+        require Cwd;
+        my $home = Cwd::abs_path($ENV{HOME});
+        # Only use if resolved path is valid and absolute
+        if ($home && $home =~ m{^/} && -d $home) {
             push @paths, File::Spec->catfile($home, '.local', 'bin', 'claude');
             push @paths, File::Spec->catfile($home, '.npm-global', 'bin', 'claude');
         }
@@ -286,8 +287,13 @@ sub _build_command {
     # For async generators, use stream-json input format
     if (!ref($self->prompt)) {
         # Sanitize control characters from prompt to prevent injection
+        # Preserve tabs (\t), newlines (\n, \r) which are common in code snippets
         my $sanitized_prompt = $self->prompt;
-        $sanitized_prompt =~ s/[[:cntrl:]]/ /g;
+        $sanitized_prompt =~ s/\x1b\[[0-9;]*[a-zA-Z]//g;  # Strip ANSI escape codes
+        $sanitized_prompt =~ s/\x1b\][^\x07]*\x07//g;     # Strip OSC sequences (title changes, etc.)
+        $sanitized_prompt =~ s/\x1b[PX^_].*?\x1b\\//g;    # Strip DCS/SOS/PM/APC sequences
+        # Remove dangerous control chars but preserve tab (\x09), newline (\x0a), carriage return (\x0d)
+        $sanitized_prompt =~ s/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/ /g;
         push @cmd, '--print', '--', $sanitized_prompt;
     }
     else {
@@ -303,7 +309,11 @@ sub _start_process {
 
     my @cmd = $self->_build_command();
 
-    warn "DEBUG: Running command: @cmd\n" if $ENV{CLAUDE_AGENT_DEBUG};
+    if ($ENV{CLAUDE_AGENT_DEBUG}) {
+        my @safe_cmd = map { $_ =~ /^--/ ? $_ : '[REDACTED]' } @cmd[0..2];
+        push @safe_cmd, '...' if @cmd > 3;
+        warn "DEBUG: Running command: @safe_cmd (full args redacted)\n";
+    }
 
     my $process = IO::Async::Process->new(
         command => \@cmd,
@@ -353,9 +363,10 @@ sub _start_process {
     $self->_stdin($process->stdin);
     $self->_loop->add($process);
 
-    # For non-streaming (--print) mode, close stdin to signal we're done
+    # For --print mode, prompt is in argv, stdin can be closed
     if (!ref($self->prompt)) {
-        $self->_stdin->close_when_empty;
+        # Schedule close after a brief delay to allow process startup
+        $self->_loop->later(sub { $self->_stdin->close_when_empty if $self->_stdin });
     }
     # For ref prompts (streaming input), caller will send messages via send_user_message
     return;
@@ -379,8 +390,20 @@ sub _handle_line {
     }
 
     # Guard against buffer overflow from accumulated malformed data
-    if (!@decoded && $self->_jsonl->remaining && length($self->_jsonl->remaining) > 100_000) {
-        warn "JSON::Lines buffer overflow detected, reinitializing\n" if $ENV{CLAUDE_AGENT_DEBUG};
+    # Configurable threshold via environment variable, default 100KB, max 10MB
+    my $buffer_threshold = $ENV{CLAUDE_AGENT_JSONL_BUFFER_MAX} // 100_000;
+    my $min_threshold = 1000;  # Minimum 1KB to prevent excessive reinitializations
+    if (!defined $buffer_threshold || $buffer_threshold !~ /^\d+$/ || $buffer_threshold < $min_threshold) {
+        warn "Invalid CLAUDE_AGENT_JSONL_BUFFER_MAX value, using default 100000\n"
+            if defined $ENV{CLAUDE_AGENT_JSONL_BUFFER_MAX};
+        $buffer_threshold = 100_000;
+    }
+    $buffer_threshold = 10_000_000 if $buffer_threshold > 10_000_000;  # Hard cap at 10MB
+
+    # Check buffer size regardless of decode success to prevent unbounded growth
+    if ($self->_jsonl->remaining && length($self->_jsonl->remaining) > $buffer_threshold) {
+        warn "JSON::Lines buffer overflow detected (size: " . length($self->_jsonl->remaining) .
+             ", threshold: $buffer_threshold), reinitializing\n" if $ENV{CLAUDE_AGENT_DEBUG};
         $self->_jsonl(JSON::Lines->new(
             utf8     => 1,
             error_cb => sub {
@@ -437,7 +460,11 @@ sub _resolve_pending_futures_on_finish {
 
     # Stop SDK servers
     for my $sdk_server (values %{$self->_sdk_servers}) {
-        $sdk_server->stop();
+        try {
+            $sdk_server->stop();
+        } catch {
+            warn "Failed to stop SDK server: $_" if $ENV{CLAUDE_AGENT_DEBUG};
+        };
     }
     return;
 }
@@ -458,17 +485,30 @@ sub next {
     return shift @{$self->_messages} if @{$self->_messages};
 
     # Wait for more messages or process to finish
-    # Configurable timeout with 10 minute default
+    # Configurable timeout with 10 minute default, max 1 hour
+    my $has_timeout = $self->options->has_query_timeout;
     my $timeout = $self->options->query_timeout // 600;
+    my $max_timeout = 3600;  # 1 hour maximum
+    if (!defined $timeout || $timeout <= 0 || $timeout > $max_timeout) {
+        warn "Invalid query_timeout value ($timeout), using default 600 seconds\n"
+            if $has_timeout && defined $timeout && $timeout != 600 && $ENV{CLAUDE_AGENT_DEBUG};
+        $timeout = 600;
+    }
     my $start_time = Time::HiRes::time();
-    while (!@{$self->_messages} && !$self->_finished
-           && (Time::HiRes::time() - $start_time) < $timeout) {
+    # Use epsilon tolerance (0.001s) to handle floating-point boundary conditions
+    my $epsilon = 0.001;
+    while (!@{$self->_messages} && !$self->_finished && !$self->_error
+           && (Time::HiRes::time() - $start_time) < ($timeout - $epsilon)) {
         $self->_loop->loop_once(0.1);  # Longer interval to reduce CPU busy-waiting
     }
 
     # Check if we timed out waiting for messages
-    if ((Time::HiRes::time() - $start_time) >= $timeout
-        && !@{$self->_messages} && !$self->_finished) {
+    # Use consistent comparison with epsilon tolerance to avoid boundary race
+    if ((Time::HiRes::time() - $start_time) >= ($timeout - $epsilon)
+        && !$self->_finished) {
+        # Final check for messages that may have arrived at timeout boundary
+        $self->_loop->loop_once(0) if !@{$self->_messages};
+        return shift @{$self->_messages} if @{$self->_messages};
         $self->_finished(1);
         $self->_error("Query timed out after $timeout seconds");
         return;  # Return immediately on timeout
@@ -583,8 +623,13 @@ sub send_user_message {
             content => $content,
         },
     }]);
-    $self->_stdin->write($msg);
-    return;
+    my $result;
+    try {
+        $result = $self->_stdin->write($msg);
+    } catch {
+        warn "send_user_message write error: $_" if $ENV{CLAUDE_AGENT_DEBUG};
+    };
+    return $result;
 }
 
 =head2 set_permission_mode

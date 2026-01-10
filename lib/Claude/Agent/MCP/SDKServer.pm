@@ -55,7 +55,11 @@ sub BUILD {
     my $temp_dir = tempdir(CLEANUP => 1);
     $self->_temp_dir($temp_dir);
 
-    my $socket_path = File::Spec->catfile($temp_dir, 'sdk.sock');
+    # Use combination of PID, time, and cryptographic random for uniqueness
+    require Crypt::URandom;
+    my $random = unpack('L', Crypt::URandom::urandom(4)) % 100000;
+    my $unique_suffix = sprintf("%d_%d_%d", $$, time(), $random);
+    my $socket_path = File::Spec->catfile($temp_dir, "sdk_${unique_suffix}.sock");
     $self->_socket_path($socket_path);
 
     $self->_jsonl(JSON::Lines->new);
@@ -111,17 +115,42 @@ sub to_stdio_config {
             $tools_json,
         ],
         env => {
-            # Filter @INC to trusted absolute paths with strict validation
-            # Limit to first 20 entries to prevent injection via appended paths
+            # Use strict allowlist approach for PERL5LIB - only include known safe paths
+            # This avoids complex symlink/traversal filtering that could be bypassed
+            # Note: We limit to first 20 @INC entries to prevent overly long PERL5LIB
+            # (typical installations have 5-15 entries; 20 is generous while bounding input)
+            # Security: abs_path resolves symlinks, but paths within allowed prefixes
+            # could still contain symlinks. The allowlist restricts to known Perl lib
+            # directories where symlink attacks are less likely to be meaningful.
+            # WARNING: Symlinks within allowed prefixes are not detected and could
+            # potentially point to unexpected locations. Consider additional validation
+            # if running in untrusted environments.
             PERL5LIB => join(':', grep {
                 my $path = $_;
                 # Must be defined, absolute, and an existing directory
                 defined $path && $path =~ m{^/} && -d $path && do {
-                    my $real = abs_path($path);
-                    # Resolved path must also be absolute and exist
-                    # Reject paths with suspicious components
-                    $real && $real =~ m{^/} && -d $real
-                        && $real !~ m{/\.\.(/|$)}  # No parent traversal
+                    require Cwd;
+                    my $real = Cwd::abs_path($path);
+                    # Double-check the resolved path exists
+                    defined $real && $real =~ m{^/} && -d $real
+                        # Use File::Spec->no_upwards equivalent check on path components
+                        && do {
+                            my @parts = File::Spec->splitdir($real);
+                            # Reject if any component is '.' or '..'
+                            !grep { $_ eq '.' || $_ eq '..' } @parts
+                        }
+                        # Restrict to known safe prefixes (standard Perl lib locations)
+                        && ($real =~ m{^/usr/(?:local/)?(?:lib|share)/perl}
+                            || $real =~ m{^/opt/local/lib/perl\d*/}
+                            || $real =~ m{^/opt/perl\d*/lib/}
+                            || $real =~ m{^/home/[^/]+/perl5/}
+                            || $real =~ m{^/Users/[^/]+/perl5/}
+                            || $real =~ m{^\Q$ENV{HOME}\E/perl5/}
+                            # Allow /lib within current working directory (for local development)
+                            # This is more restrictive than generic /lib$ pattern
+                            || (defined $ENV{PWD} && $real =~ m{^\Q$ENV{PWD}\E/(?:blib/)?lib$})
+                            || $real =~ m{/blib/lib$}
+                        )
                 }
             } @INC[0 .. ($#INC > 19 ? 19 : $#INC)]),
         },
@@ -140,11 +169,8 @@ sub start {
     require IO::Async::Listener;
     require IO::Async::Stream;
 
-    # Remove existing socket if present - use atomic unlink to avoid TOCTOU race
-    unlink $self->_socket_path or do {
-        die "Cannot remove existing path: " . $self->_socket_path . ": $!"
-            unless $! == ENOENT;
-    };
+    # Just attempt to start the listener - let it fail with a clear error
+    # rather than pre-checking which has a TOCTOU race condition
 
     my $listener = IO::Async::Listener->new(
         on_stream => sub {
@@ -189,6 +215,11 @@ sub start {
 sub _handle_request {
     my ($self, $stream, $line) = @_;
 
+    # Note: Multiple concurrent requests from different connections may result
+    # in interleaved responses. Response ordering relies on client-side correlation
+    # using the request_id field. Each response includes the id from its corresponding
+    # request for proper matching.
+
     my @requests;
     my $parse_error;
     try {
@@ -222,8 +253,17 @@ sub _handle_request {
         my $result;
         if ($tool) {
             $result = $tool->execute($args);
-            # Validate result structure
-            unless (ref $result eq 'HASH') {
+            # Validate result structure: must be hash with content as array
+            my $valid = ref $result eq 'HASH' && ref($result->{content}) eq 'ARRAY';
+            if ($valid) {
+                for my $block (@{$result->{content}}) {
+                    unless (ref $block eq 'HASH' && defined $block->{type}) {
+                        $valid = 0;
+                        last;
+                    }
+                }
+            }
+            unless ($valid) {
                 $result = {
                     content  => [{ type => 'text', text => 'Invalid handler result format' }],
                     is_error => 1,
@@ -266,14 +306,23 @@ sub stop {
         $self->_listener(undef);
     }
 
-    # Unlink unconditionally - ignore ENOENT to avoid TOCTOU race
-    unlink $self->_socket_path;
+    # Unlink unconditionally - log non-ENOENT errors for debugging but don't die
+    # This is consistent with start() error handling
+    if (!unlink($self->_socket_path) && $! != ENOENT) {
+        warn "SDKServer: Could not remove socket during stop: " . $self->_socket_path . ": $!\n"
+            if $ENV{CLAUDE_AGENT_DEBUG};
+    }
     return;
 }
 
 sub DEMOLISH {
     my ($self) = @_;
-    $self->stop();
+    # Defensive check: loop may be invalid during object destruction
+    try {
+        $self->stop() if $self->loop;
+    } catch {
+        warn "SDKServer DEMOLISH error: $_\n" if $ENV{CLAUDE_AGENT_DEBUG};
+    };
     return;
 }
 

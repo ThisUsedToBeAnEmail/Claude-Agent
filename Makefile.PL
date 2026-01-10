@@ -29,6 +29,7 @@ my %WriteMakefileArgs = (
         'File::Which'        => '1.27',
         'Const::XS'          => '1.03',
         'namespace::clean'   => '0.27',
+	'Crypt::URandom'     => '0.54',
     },
     META_MERGE => {
         'meta-spec' => { version => 2 },

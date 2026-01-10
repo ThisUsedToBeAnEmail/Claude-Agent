@@ -28,27 +28,55 @@ process by the Claude CLI.
 
 =cut
 
-# Module-level state - reset at start of run() for safety in persistent environments
-my $socket;
-my $socket_stream;
-my $request_id = 0;
-my %pending_requests;
-my $jsonl;
-my $loop;
-# Response coordination state for call_parent_handler
-my $response_buffer;
-my $got_response;
+# Module-level state - encapsulated in a state object for cleaner isolation
+# All state is reset atomically at the start of run() to handle persistent interpreters
+sub _make_state_class {
+    my $class = 'Claude::Agent::MCP::SDKRunner::State';
+    no strict 'refs';  ## no critic (ProhibitNoStrict)
+    *{"${class}::new"} = sub {
+        my ($cls) = @_;
+        return bless {
+            socket          => undef,
+            socket_stream   => undef,
+            request_id      => 0,
+            pending_requests => {},
+            jsonl           => undef,
+            loop            => undef,
+            response_buffer => '',
+            got_response    => 0,
+        }, $cls;
+    };
+    *{"${class}::reset_state"} = sub {
+        my ($self) = @_;
+        $self->{socket} = undef;
+        $self->{socket_stream} = undef;
+        $self->{request_id} = 0;
+        $self->{pending_requests} = {};
+        $self->{jsonl} = JSON::Lines->new;
+        $self->{loop} = undef;
+        $self->{response_buffer} = '';
+        $self->{got_response} = 0;
+        return $self;
+    };
+    return $class;
+}
+BEGIN { _make_state_class() }
+
+# Single state object - reset atomically at start of run()
+my $state = Claude::Agent::MCP::SDKRunner::State->new;
+
+# Accessors for backward compatibility with existing code
+sub _socket        { return $state->{socket}; }
+sub _socket_stream { return $state->{socket_stream}; }
+sub _request_id    { return $state->{request_id}; }
+sub _jsonl         { return $state->{jsonl}; }
+sub _loop          { return $state->{loop}; }
+sub _response_buffer { return $state->{response_buffer}; }
+sub _got_response  { return $state->{got_response}; }
 
 sub run {
-    # Reset module-level state for safety in persistent interpreter environments
-    $socket = undef;
-    $socket_stream = undef;
-    $request_id = 0;
-    %pending_requests = ();
-    $jsonl = JSON::Lines->new;
-    $loop = undef;
-    $response_buffer = '';
-    $got_response = 0;
+    # Reset all state atomically - no gap between declaration and initialization
+    $state->reset_state();
 
     binmode(STDIN,  ':raw');
     binmode(STDOUT, ':raw');
@@ -75,23 +103,30 @@ sub run {
     # Limit tools_json size to prevent memory exhaustion (1MB limit)
     die "tools_json too large (max 1MB)\n" if length($tools_json) > 1_000_000;
 
-    my ($tools) = $jsonl->decode($tools_json);
+    my ($tools) = $state->{jsonl}->decode($tools_json);
+
+    # Validate decoded structure: must be an array of tool definitions
+    die "Invalid tools_json: expected array\n" unless ref $tools eq 'ARRAY';
+    for my $tool (@$tools) {
+        die "Invalid tool definition: expected hash with 'name' key\n"
+            unless ref $tool eq 'HASH' && defined $tool->{name};
+    }
 
     # Build tool lookup
     my %tool_by_name = map { $_->{name} => $_ } @$tools;
 
     # Connect to parent socket
-    $socket = IO::Socket::UNIX->new(
+    $state->{socket} = IO::Socket::UNIX->new(
         Type => SOCK_STREAM,
         Peer => $socket_path,
     ) or die "Cannot connect to socket $socket_path: $!\n";
 
-    $socket->autoflush(1);
+    $state->{socket}->autoflush(1);
 
     warn "SDKRunner: Connected to $socket_path\n" if $ENV{CLAUDE_AGENT_DEBUG};
 
     # Create IO::Async event loop
-    $loop = IO::Async::Loop->new;
+    $state->{loop} = IO::Async::Loop->new;
 
     # Track running state
     my $running = 1;
@@ -100,7 +135,7 @@ sub run {
     my $shutdown = sub {
         return unless $running;
         $running = 0;
-        $loop->stop;
+        $state->{loop}->stop;
     };
 
     # Handle signals for graceful shutdown
@@ -122,7 +157,7 @@ sub run {
                 my @requests;
                 my $parse_error;
                 try {
-                    @requests = $jsonl->decode($line);
+                    @requests = $state->{jsonl}->decode($line);
                 } catch {
                     $parse_error = $_;
                 };
@@ -137,7 +172,7 @@ sub run {
                     );
 
                     if ($response) {
-                        my $json = $jsonl->encode([$response]);
+                        my $json = $state->{jsonl}->encode([$response]);
                         warn "SDKRunner: Sending: $json\n" if $ENV{CLAUDE_AGENT_DEBUG};
                         print $json;
                         STDOUT->flush();
@@ -159,18 +194,18 @@ sub run {
 
     # Create async stream for socket (to parent SDKServer)
     # Used for async writes and monitoring disconnection
-    # Response reads are handled via module-level $response_buffer/$got_response
+    # Response reads are handled via $state->{response_buffer}/$state->{got_response}
     # which call_parent_handler uses with loop_once() polling
-    $socket_stream = IO::Async::Stream->new(
-        handle => $socket,
+    $state->{socket_stream} = IO::Async::Stream->new(
+        handle => $state->{socket},
         on_read => sub {
             my ($stream, $buffref) = @_;
             # Buffer incoming data for call_parent_handler to consume
-            $response_buffer .= $$buffref;
+            $state->{response_buffer} .= $$buffref;
             $$buffref = '';
             # Check if we have a complete line
-            if ($response_buffer =~ /\n/) {
-                $got_response = 1;
+            if ($state->{response_buffer} =~ /\n/) {
+                $state->{got_response} = 1;
             }
             return 0;
         },
@@ -185,16 +220,16 @@ sub run {
         },
     );
 
-    $loop->add($stdin_stream);
-    $loop->add($socket_stream);
+    $state->{loop}->add($stdin_stream);
+    $state->{loop}->add($state->{socket_stream});
 
     # Run the event loop
-    $loop->run;
+    $state->{loop}->run;
 
     # Cleanup
-    $loop->remove($stdin_stream) if $stdin_stream;
-    $loop->remove($socket_stream) if $socket_stream;
-    $socket->close() if $socket;
+    $state->{loop}->remove($stdin_stream) if $stdin_stream;
+    $state->{loop}->remove($state->{socket_stream}) if $state->{socket_stream};
+    $state->{socket}->close() if $state->{socket};
     return;
 }
 
@@ -283,23 +318,37 @@ sub handle_mcp_request {
     }
 
     # Unknown method
+    my $safe_method = defined $method ? substr($method, 0, 100) : '<undefined>';
+    $safe_method =~ s/[[:cntrl:]]//g;
     return {
         jsonrpc => '2.0',
         id      => $id,
         error   => {
             code    => -32601,
-            message => "Method not found: $method",
+            message => "Method not found: $safe_method",
         },
     };
+}
+
+sub _generate_uuid {
+    # Generate a UUID v4-like string to avoid request ID collisions
+    # Uses cryptographically secure random bytes for robust uniqueness
+    require Crypt::URandom;
+    my $random_bytes = Crypt::URandom::urandom(16);
+    my $uuid = unpack('H*', $random_bytes);
+    $uuid =~ s/(.{8})(.{4})(.{4})(.{4})(.{12})/$1-$2-$3-$4-$5/;
+    return $uuid;
 }
 
 sub call_parent_handler {
     my ($tool_name, $args) = @_;
 
-    $request_id++;
+    # Use UUID-based request IDs to eliminate any possibility of ID collision
+    # even if async/threaded handling is added in the future
+    my $request_id = _generate_uuid();
 
     # Send request to parent via async stream
-    my $request = $jsonl->encode([{
+    my $request = $state->{jsonl}->encode([{
         id   => $request_id,
         tool => $tool_name,
         args => $args,
@@ -307,29 +356,42 @@ sub call_parent_handler {
 
     warn "SDKRunner: Sending to parent: $request\n" if $ENV{CLAUDE_AGENT_DEBUG};
 
-    $socket_stream->write($request);
+    $state->{socket_stream}->write($request);
 
     # Reset response flag before waiting
-    $got_response = 0;
+    $state->{got_response} = 0;
 
     # Wait for response with configurable timeout using actual elapsed time
     require Time::HiRes;
     my $timeout = $ENV{CLAUDE_AGENT_TOOL_TIMEOUT} // 60;
-    # Validate timeout: must be positive integer, max 1 hour
-    $timeout = 60 unless defined $timeout && $timeout =~ /^\d+$/ && $timeout > 0 && $timeout <= 3600;
+    # Ensure numeric value between 1-3600 seconds (1 sec to 1 hour)
+    # Non-numeric, empty, zero, or out-of-range values fall back to 60s default
+    # Security note: High timeout values (e.g., 3600) can tie up system resources
+    # for extended periods. Consider using conservative values in production.
+    if (!defined $timeout || $timeout !~ /^\d+$/ || $timeout < 1 || $timeout > 3600) {
+        $timeout = 60;
+    }
     my $start_time = Time::HiRes::time();
-    my $interval = 0.1;
+    my $backoff = 0.1;
 
-    while (!$got_response && (Time::HiRes::time() - $start_time) < $timeout) {
-        $loop->loop_once($interval);
+    while (!$state->{got_response}) {
+        # Check elapsed time before loop_once to ensure accurate timeout enforcement
+        my $elapsed = Time::HiRes::time() - $start_time;
+        last if $elapsed >= $timeout;
+
+        $state->{loop}->loop_once($backoff);
+        $backoff = $backoff * 1.5 if $backoff < 1.0;  # Exponential backoff up to 1 second
+
+        # Re-check elapsed time after loop_once in case it took longer than expected
+        last if (Time::HiRes::time() - $start_time) >= $timeout;
     }
 
     # Extract the response line from buffer
     my $response_line;
-    if ($response_buffer =~ s/^(.+)\n//) {
+    if ($state->{response_buffer} =~ s/^(.+)\n//) {
         $response_line = $1;
         # Reset flag if no more complete lines
-        $got_response = 0 unless $response_buffer =~ /\n/;
+        $state->{got_response} = 0 unless $state->{response_buffer} =~ /\n/;
     }
 
     unless ($response_line) {
@@ -344,7 +406,7 @@ sub call_parent_handler {
 
     my ($response, $parse_error);
     try {
-        ($response) = $jsonl->decode($response_line);
+        ($response) = $state->{jsonl}->decode($response_line);
     } catch {
         $parse_error = $_;
     };

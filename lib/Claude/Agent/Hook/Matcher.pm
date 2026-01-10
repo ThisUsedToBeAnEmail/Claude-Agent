@@ -61,10 +61,15 @@ Defines a hook matcher that triggers callbacks for specific tools.
 
 Check if this matcher matches the given tool name.
 
-B<Note:> Regex timeout protection uses alarm() which only works on
-Unix-like systems. On Windows, malicious regex patterns may not be
-interrupted. Pattern length is also limited to 1000 characters to
-provide an additional layer of ReDoS protection.
+B<IMPORTANT - Platform Limitation:> Regex timeout protection uses alarm()
+which only works on Unix-like systems. B<On Windows (MSWin32, cygwin),
+malicious regex patterns will NOT be interrupted and could cause the
+process to hang indefinitely.> Pattern length is limited to 1000 characters
+and basic nested quantifier detection is performed to provide additional
+ReDoS protection, but sophisticated ReDoS attacks with shorter patterns
+may still be possible. Consider using pre-validated patterns or a regex
+library with built-in timeout support (e.g., re::engine::PCRE2) for
+security-critical applications on Windows.
 
 =cut
 

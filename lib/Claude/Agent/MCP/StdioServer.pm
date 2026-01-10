@@ -11,6 +11,45 @@ use Marlin
     'env'      => sub { {} },
     'type'     => sub { 'stdio' };
 
+sub BUILD {
+    my ($self) = @_;
+    die "Command must be absolute path" unless $self->command =~ m{^/};
+
+    # Validate args to prevent command injection via shell metacharacters
+    # Args are passed to execve() not through shell, but some programs may
+    # interpret special characters. Reject obviously dangerous patterns.
+    for my $arg (@{$self->args}) {
+        next unless defined $arg;
+        # Reject null bytes which could truncate arguments
+        die "Invalid arg: contains null byte" if $arg =~ /\0/;
+        # Reject shell metacharacters that could be dangerous if passed to subshells
+        die "Invalid arg: contains shell metacharacters"
+            if $arg =~ /[`\$\(\)\{\};\|<>\\\n\r]/;
+    }
+
+    # Validate environment variables to prevent injection attacks
+    # Environment variable values can affect child process behavior
+    for my $key (keys %{$self->env}) {
+        # Validate environment variable names: must be alphanumeric with underscores
+        # Standard POSIX convention, reject special characters that could cause issues
+        die "Invalid env var name '$key': must match [A-Za-z_][A-Za-z0-9_]*"
+            unless $key =~ /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+        my $value = $self->env->{$key};
+        next unless defined $value;
+
+        # Reject null bytes which could truncate values or cause security issues
+        die "Invalid env var value for '$key': contains null byte" if $value =~ /\0/;
+
+        # Reject control characters (except tab, which is sometimes legitimate)
+        # Control chars could affect terminal behavior or be used for injection
+        die "Invalid env var value for '$key': contains control characters"
+            if $value =~ /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
+    }
+
+    return;
+}
+
 =head1 NAME
 
 Claude::Agent::MCP::StdioServer - Stdio MCP server configuration

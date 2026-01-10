@@ -88,21 +88,29 @@ is($hash->{tools}[0]{name}, 'calculate', 'server to_hash tool name');
 
 # Test MCP::StdioServer
 my $stdio_server = Claude::Agent::MCP::StdioServer->new(
-    command => 'npx',
+    command => '/usr/bin/npx',
     args    => ['-y', '@modelcontextprotocol/server-filesystem'],
     env     => { HOME => '/home/user' },
 );
 
 isa_ok($stdio_server, 'Claude::Agent::MCP::StdioServer');
-is($stdio_server->command, 'npx', 'stdio command');
+is($stdio_server->command, '/usr/bin/npx', 'stdio command');
 is($stdio_server->type, 'stdio', 'stdio type');
 is_deeply($stdio_server->args, ['-y', '@modelcontextprotocol/server-filesystem'], 'stdio args');
 is_deeply($stdio_server->env, { HOME => '/home/user' }, 'stdio env');
 
 $hash = $stdio_server->to_hash;
 is($hash->{type}, 'stdio', 'stdio to_hash type');
-is($hash->{command}, 'npx', 'stdio to_hash command');
+is($hash->{command}, '/usr/bin/npx', 'stdio to_hash command');
 is_deeply($hash->{args}, ['-y', '@modelcontextprotocol/server-filesystem'], 'stdio to_hash args');
+
+# Test StdioServer validation - relative path rejected
+eval { Claude::Agent::MCP::StdioServer->new(command => 'npx') };
+like($@, qr/absolute path/, 'StdioServer rejects relative path');
+
+# Test StdioServer validation - shell metacharacters rejected
+eval { Claude::Agent::MCP::StdioServer->new(command => '/usr/bin/cmd', args => ['$(evil)']) };
+like($@, qr/shell metacharacters/, 'StdioServer rejects shell metacharacters in args');
 
 # Test MCP::SSEServer
 my $sse_server = Claude::Agent::MCP::SSEServer->new(

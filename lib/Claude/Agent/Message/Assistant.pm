@@ -51,6 +51,11 @@ B<Note:> Results are cached on first access. If the underlying message content
 is modified after this method is called, the cached value will be returned
 on subsequent calls. Messages are typically immutable after creation.
 
+B<Warning:> The returned arrayref is a shallow copy - the Content objects
+inside are shared with the cache. Modifying these objects in place will
+affect all subsequent calls to content_blocks(). Treat returned objects
+as read-only, or clone them if mutation is required.
+
 =head3 text
 
     my $text = $msg->text;
@@ -82,7 +87,8 @@ sub content_blocks {
     } @$raw;
 
     $self->_content_blocks_cache(\@blocks);
-    return \@blocks;
+    # Note: Returns shallow copy of array; objects inside are shared
+    return [@{$self->_content_blocks_cache}];
 }
 
 sub text {

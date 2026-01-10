@@ -12,6 +12,13 @@ use Marlin
     'sensitive_headers' => sub { [] },  # Headers to redact from debug output
     'type'             => sub { 'http' };
 
+sub BUILD {
+    my ($self) = @_;
+    die "URL must use http or https scheme"
+        unless $self->url =~ m{^https?://}i;
+    return;
+}
+
 =head1 NAME
 
 Claude::Agent::MCP::HTTPServer - HTTP MCP server configuration
