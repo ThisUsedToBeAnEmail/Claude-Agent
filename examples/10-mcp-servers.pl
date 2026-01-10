@@ -19,6 +19,9 @@ use Claude::Agent::MCP::SSEServer;
 use Claude::Agent::MCP::HTTPServer;
 
 # 1. SDK Server (in-process tools)
+# SDK servers execute tool handlers locally in your Perl process.
+# When Claude calls an SDK MCP tool, the SDK intercepts the request,
+# runs your handler, and sends the result back to the CLI.
 say "1. Creating SDK MCP Server";
 say "-" x 50;
 
@@ -64,15 +67,20 @@ my $sdk_server = create_sdk_mcp_server(
 say "SDK server created with tools: " . join(', ', @{$sdk_server->tool_names});
 
 # 2. Stdio Server (external process)
+# The CLI spawns the command and communicates via stdin/stdout.
 say "\n2. Creating Stdio MCP Server";
 say "-" x 50;
 
+# Example using the filesystem MCP server (a real, working server):
+# my $stdio_server = Claude::Agent::MCP::StdioServer->new(
+#     command => 'npx',
+#     args    => ['-y', '@modelcontextprotocol/server-filesystem', '/tmp'],
+# );
+
 my $stdio_server = Claude::Agent::MCP::StdioServer->new(
     command => 'npx',
-    args    => ['-y', '@anthropic/some-mcp-server'],
-    env     => {
-        API_KEY => 'your-api-key-here',
-    },
+    args    => ['-y', '@modelcontextprotocol/server-memory'],
+    env     => {},
 );
 
 say "Stdio server config:";
@@ -111,7 +119,8 @@ say "HTTP server config:";
 say "  URL: " . $http_server->url;
 say "  Type: " . $http_server->type;
 
-# 5. Using SDK server in a query
+# 5. Using SDK Server in a real query
+# SDK tools execute locally - no external server needed!
 say "\n5. Using SDK Server in Query";
 say "-" x 50;
 
@@ -123,7 +132,7 @@ my $options = Claude::Agent::Options->new(
 );
 
 my $iter = query(
-    prompt  => 'Greet Alice in an enthusiastic style.',
+    prompt  => 'Use the greet tool to greet "Bob" with an enthusiastic style.',
     options => $options,
 );
 
@@ -132,6 +141,9 @@ while (my $msg = $iter->next) {
         for my $block (@{$msg->content_blocks}) {
             if ($block->isa('Claude::Agent::Content::Text')) {
                 print $block->text;
+            }
+            elsif ($block->isa('Claude::Agent::Content::ToolUse')) {
+                say "\n[Calling: " . $block->name . "]";
             }
         }
     }
@@ -143,3 +155,8 @@ while (my $msg = $iter->next) {
 
 say "-" x 50;
 say "MCP servers example complete!";
+say "";
+say "Summary:";
+say "  - SDK servers: Execute tool handlers locally in your Perl process";
+say "  - Stdio servers: CLI spawns external process, communicates via stdin/stdout";
+say "  - SSE/HTTP servers: Connect to remote MCP servers";

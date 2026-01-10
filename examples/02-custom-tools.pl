@@ -3,35 +3,30 @@
 # Custom Tools Example
 #
 # This example demonstrates how to define custom MCP tools
-# that can be passed to Claude. Note: SDK MCP servers require
-# CLI support for in-process tool execution.
-#
-# For now, this example shows the tool definition pattern
-# and uses standard built-in tools.
+# that execute locally in your Perl process. When Claude calls
+# an SDK MCP tool, the handler runs in your application and
+# the result is sent back to the CLI.
 #
 
 use 5.020;
 use strict;
 use warnings;
+use open ':std', ':encoding(UTF-8)';
 
 use lib 'lib';
 use Claude::Agent qw(query tool create_sdk_mcp_server);
 use Claude::Agent::Options;
 
-# Demonstrate tool definition pattern (for future MCP SDK server support)
-say "Tool Definition Examples:";
-say "-" x 50;
-
-# Create a calculator tool definition
+# Create a calculator tool that executes locally
 my $calculator = tool(
     'calculate',
-    'Perform mathematical calculations. Supports basic arithmetic.',
+    'Perform mathematical calculations. Supports basic arithmetic (+, -, *, /, parentheses).',
     {
         type       => 'object',
         properties => {
             expression => {
                 type        => 'string',
-                description => 'Mathematical expression to evaluate',
+                description => 'Mathematical expression to evaluate (e.g., "2 + 2", "10 * 5")',
             },
         },
         required => ['expression'],
@@ -40,47 +35,84 @@ my $calculator = tool(
         my ($args) = @_;
         my $expr = $args->{expression};
 
-        # Simple safe evaluation
+        # Simple safe evaluation - only allow numbers and basic operators
         if ($expr =~ /^[\d\s\+\-\*\/\.\(\)]+$/) {
             my $result = eval $expr;
+            if ($@) {
+                return {
+                    content  => [{ type => 'text', text => "Evaluation error: $@" }],
+                    is_error => 1,
+                };
+            }
             return {
                 content => [{ type => 'text', text => "Result: $result" }],
             };
         }
         return {
-            content  => [{ type => 'text', text => "Invalid expression" }],
+            content  => [{ type => 'text', text => "Invalid expression: only numbers and +, -, *, /, () are allowed" }],
             is_error => 1,
         };
     }
 );
 
-say "Created tool: " . $calculator->name;
-say "  Description: " . $calculator->description;
+# Create a greeting tool
+my $greeter = tool(
+    'greet',
+    'Generate a personalized greeting for someone.',
+    {
+        type       => 'object',
+        properties => {
+            name => {
+                type        => 'string',
+                description => 'Name of the person to greet',
+            },
+            style => {
+                type        => 'string',
+                enum        => ['formal', 'casual', 'enthusiastic'],
+                description => 'Style of greeting (default: casual)',
+            },
+        },
+        required => ['name'],
+    },
+    sub {
+        my ($args) = @_;
+        my $name  = $args->{name};
+        my $style = $args->{style} // 'casual';
 
-# Create an SDK MCP server (demonstrates the pattern)
+        my $greeting = $style eq 'formal'       ? "Good day, $name. How may I assist you?"
+                     : $style eq 'enthusiastic' ? "Hey $name! Great to see you!"
+                     :                            "Hi $name!";
+
+        return {
+            content => [{ type => 'text', text => $greeting }],
+        };
+    }
+);
+
+# Create an SDK MCP server with our tools
 my $server = create_sdk_mcp_server(
     name    => 'utilities',
-    tools   => [$calculator],
+    tools   => [$calculator, $greeter],
     version => '1.0.0',
 );
 
-say "\nCreated MCP Server: " . $server->name;
+say "SDK MCP Server: " . $server->name;
 say "  Tools: " . join(', ', @{$server->tool_names});
-say "  Version: " . $server->version;
+say "";
 
-# For actual use, send a query with built-in tools
-say "\n" . "-" x 50;
-say "Running query with built-in tools...";
-say "-" x 50;
-
+# Use the SDK tools in a query
 my $options = Claude::Agent::Options->new(
-    allowed_tools   => ['Glob', 'Grep'],
+    mcp_servers     => { utilities => $server },
+    allowed_tools   => ['mcp__utilities__calculate', 'mcp__utilities__greet'],
     permission_mode => 'bypassPermissions',
-    max_turns       => 3,
+    max_turns       => 5,
 );
 
+say "Running query with SDK MCP tools...";
+say "-" x 50;
+
 my $iter = query(
-    prompt  => 'Use Glob to find all .pm files in lib/Claude/Agent/Message/ directory.',
+    prompt  => 'First, use the calculate tool to compute 42 * 17. Then use the greet tool to greet "Alice" with an enthusiastic style.',
     options => $options,
 );
 
@@ -91,12 +123,12 @@ while (my $msg = $iter->next) {
                 print $block->text;
             }
             elsif ($block->isa('Claude::Agent::Content::ToolUse')) {
-                say "\n[Using: " . $block->name . "]";
+                say "\n[Calling: " . $block->name . "]";
             }
         }
     }
     elsif ($msg->isa('Claude::Agent::Message::Result')) {
-        say "\n", "-" x 50;
+        say "\n" . "-" x 50;
         say "Completed!";
         last;
     }

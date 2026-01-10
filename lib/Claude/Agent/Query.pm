@@ -17,6 +17,7 @@ use Marlin
     '_session_id==.',                              # Session ID from init message
     '_finished==.' => sub { 0 },                   # Process finished flag
     '_error==.',                                   # Error message if process failed
+    '_sdk_servers==.' => sub { {} },               # SDK server wrappers (name => SDKServer)
     '_jsonl==.' => sub {
         JSON::Lines->new(
             utf8     => 1,
@@ -39,6 +40,7 @@ use File::Which qw(which);
 use Claude::Agent::Options;
 use Claude::Agent::Message;
 use Claude::Agent::Error;
+use Claude::Agent::MCP::SDKServer;
 
 =head1 NAME
 
@@ -100,6 +102,26 @@ sub BUILD {
     # Use provided loop or create a new one
     # For proper async, callers should pass their own loop
     $self->_loop($self->loop // IO::Async::Loop->new);
+
+    # Create SDKServer wrappers for SDK MCP servers
+    # These spawn socket listeners that the MCP runner connects to
+    if ($self->options->has_mcp_servers && $self->options->mcp_servers) {
+        for my $name (keys %{$self->options->mcp_servers}) {
+            my $server = $self->options->mcp_servers->{$name};
+            # Only wrap SDK-type servers
+            if ($server->can('type') && $server->type eq 'sdk') {
+                my $sdk_server = Claude::Agent::MCP::SDKServer->new(
+                    server => $server,
+                    loop   => $self->_loop,
+                );
+                $sdk_server->start();
+                $self->_sdk_servers->{$name} = $sdk_server;
+                warn "DEBUG: Started SDK server '$name' on socket: " . $sdk_server->socket_path . "\n"
+                    if $ENV{CLAUDE_AGENT_DEBUG};
+            }
+        }
+    }
+
     $self->_start_process();
 }
 
@@ -184,12 +206,26 @@ sub _build_command {
     }
 
     # Add MCP servers config
-    if ($opts->has_mcp_servers && $opts->mcp_servers) {
+    # SDK servers are converted to stdio servers pointing to our SDKRunner
+    if ($opts->has_mcp_servers && $opts->mcp_servers || keys %{$self->_sdk_servers}) {
         my %servers;
-        for my $name (keys %{$opts->mcp_servers}) {
-            my $server = $opts->mcp_servers->{$name};
-            $servers{$name} = $server->can('to_hash') ? $server->to_hash : $server;
+
+        # Add non-SDK servers directly
+        if ($opts->has_mcp_servers && $opts->mcp_servers) {
+            for my $name (keys %{$opts->mcp_servers}) {
+                my $server = $opts->mcp_servers->{$name};
+                # Skip SDK servers - they're handled via SDKServer wrappers below
+                next if $server->can('type') && $server->type eq 'sdk';
+                $servers{$name} = $server->can('to_hash') ? $server->to_hash : $server;
+            }
         }
+
+        # Add SDK servers as stdio servers pointing to our runner
+        for my $name (keys %{$self->_sdk_servers}) {
+            my $sdk_server = $self->_sdk_servers->{$name};
+            $servers{$name} = $sdk_server->to_stdio_config();
+        }
+
         if (%servers) {
             require Cpanel::JSON::XS;
             push @cmd, '--mcp-config', Cpanel::JSON::XS::encode_json({ mcpServers => \%servers });
@@ -224,11 +260,12 @@ sub _build_command {
     }
 
     # For string prompts, use --print mode with -- separator
+    # For async generators, use stream-json input format
     if (!ref($self->prompt)) {
         push @cmd, '--print', '--', $self->prompt;
     }
     else {
-        # For streaming input, use stream-json input format
+        # For streaming input (async generator), use stream-json input format
         push @cmd, '--input-format', 'stream-json';
     }
 
@@ -288,10 +325,10 @@ sub _start_process {
     $self->_stdin($process->stdin);
 
     # For non-streaming (--print) mode, close stdin to signal we're done
-    # This allows the CLI to start processing immediately
     if (!ref($self->prompt)) {
         $self->_stdin->close_when_empty;
     }
+    # For ref prompts (streaming input), caller will send messages via send_user_message
 }
 
 sub _handle_line {
@@ -331,6 +368,11 @@ sub _resolve_pending_futures_on_finish {
     # Resolve any pending futures with undef when process finishes
     while (my $future = shift @{$self->_pending_futures}) {
         $future->done(undef);
+    }
+
+    # Stop SDK servers
+    for my $sdk_server (values %{$self->_sdk_servers}) {
+        $sdk_server->stop();
     }
 }
 

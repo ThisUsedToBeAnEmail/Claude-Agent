@@ -30,6 +30,8 @@ lib/Claude/Agent/Hook/Matcher.pm
 lib/Claude/Agent/Hook/Result.pm
 lib/Claude/Agent/MCP.pm
 lib/Claude/Agent/MCP/HTTPServer.pm
+lib/Claude/Agent/MCP/SDKRunner.pm
+lib/Claude/Agent/MCP/SDKServer.pm
 lib/Claude/Agent/MCP/Server.pm
 lib/Claude/Agent/MCP/SSEServer.pm
 lib/Claude/Agent/MCP/StdioServer.pm

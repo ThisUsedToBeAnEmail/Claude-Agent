@@ -1,5 +1,14 @@
 Revision history for Claude-Agent
 
+0.03    2026-01-10
+        - SDK MCP tools now execute locally via Unix socket IPC
+        - Added Claude::Agent::MCP::SDKServer for socket-based tool execution
+        - Added Claude::Agent::MCP::SDKRunner as the MCP protocol handler
+        - SDK servers are automatically converted to stdio MCP servers
+        - Tool handlers can now access application state, databases, and APIs
+        - Updated POD documentation for SDK MCP functionality
+        - Updated examples/02-custom-tools.pl and examples/10-mcp-servers.pl
+
 0.02    2026-01-10
         - Async improvements: truly event-driven next_async() instead of polling
         - Added 'loop' parameter to query(), Client, and Query for shared event loops

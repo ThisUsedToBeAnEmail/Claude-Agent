@@ -19,11 +19,11 @@ Claude::Agent - Perl SDK for the Claude Agent SDK
 
 =head1 VERSION
 
-Version 0.02
+Version 0.03
 
 =cut
 
-our $VERSION = '0.02';
+our $VERSION = '0.03';
 
 =head1 SYNOPSIS
 
@@ -152,34 +152,76 @@ sub query {
 
 =head2 tool
 
-    my $calc = tool(
+    my $calculator = tool(
         'calculate',
-        'Perform mathematical calculations',
-        { expression => { type => 'string' } },
+        'Perform basic arithmetic calculations',
+        {
+            type       => 'object',
+            properties => {
+                a => {
+                    type        => 'number',
+                    description => 'First operand',
+                },
+                b => {
+                    type        => 'number',
+                    description => 'Second operand',
+                },
+                operation => {
+                    type        => 'string',
+                    enum        => ['add', 'subtract', 'multiply', 'divide'],
+                    description => 'The arithmetic operation to perform',
+                },
+            },
+            required => ['a', 'b', 'operation'],
+        },
         sub {
             my ($args) = @_;
-            my $result = eval $args->{expression};
+            my ($a, $b, $op) = @{$args}{qw(a b operation)};
+
+            my $result = $op eq 'add'      ? $a + $b
+                       : $op eq 'subtract' ? $a - $b
+                       : $op eq 'multiply' ? $a * $b
+                       : $op eq 'divide'   ? ($b != 0 ? $a / $b : 'Error: division by zero')
+                       :                     'Error: unknown operation';
+
             return {
                 content => [{ type => 'text', text => "Result: $result" }]
             };
         }
     );
 
-Creates an MCP tool definition.
+Creates an MCP tool definition for use with SDK MCP servers. The handler
+executes locally in your Perl process when Claude calls the tool.
 
 =head3 Arguments
 
 =over 4
 
-=item * name - Tool name
+=item * name - Tool name (will be prefixed with mcp__<server>__)
 
-=item * description - Tool description
+=item * description - Description of what the tool does
 
-=item * input_schema - JSON Schema for tool input
+=item * input_schema - JSON Schema defining the tool's input parameters
 
-=item * handler - Coderef that handles tool execution
+=item * handler - Coderef that executes the tool logic
 
 =back
+
+=head3 Handler Signature
+
+    sub handler {
+        my ($args) = @_;
+
+        # $args is a hashref of input parameters
+
+        # Return a result hashref:
+        return {
+            content => [
+                { type => 'text', text => 'Result text' },
+            ],
+            is_error => 0,  # Optional, default false
+        };
+    }
 
 =head3 Returns
 
@@ -202,19 +244,31 @@ sub tool {
 =head2 create_sdk_mcp_server
 
     my $server = create_sdk_mcp_server(
-        name  => 'my-tools',
-        tools => [$calc, $other_tool],
+        name    => 'utils',
+        tools   => [$greeter],
+        version => '1.0.0',
     );
 
-Creates an SDK MCP server configuration.
+    # Use in options
+    my $options = Claude::Agent::Options->new(
+        mcp_servers   => { utils => $server },
+        allowed_tools => ['mcp__utils__greet'],
+    );
+
+Creates an SDK MCP server that runs tool handlers locally in your Perl
+process. When Claude calls a tool from this server, the SDK intercepts
+the request, executes your handler, and returns the result.
+
+This is the recommended way to extend Claude with custom tools that need
+access to your application's state or APIs.
 
 =head3 Arguments
 
 =over 4
 
-=item * name - Server name
+=item * name - Server name (used in tool naming: mcp__<name>__<tool>)
 
-=item * tools - ArrayRef of tool definitions
+=item * tools - ArrayRef of L<Claude::Agent::MCP::ToolDefinition> objects
 
 =item * version - Server version (default: '1.0.0')
 
@@ -223,6 +277,19 @@ Creates an SDK MCP server configuration.
 =head3 Returns
 
 A L<Claude::Agent::MCP::Server> object.
+
+=head3 How It Works
+
+The SDK creates a Unix socket and spawns a lightweight MCP server process.
+The CLI connects to this server via stdio. When a tool is called:
+
+1. CLI sends the tool request to the MCP server process
+2. MCP server forwards the request to your Perl process via the socket
+3. Your handler executes and returns a result
+4. Result flows back through the socket to the CLI
+
+This architecture allows your handlers to access your application's state,
+database connections, and other resources.
 
 =cut
 
