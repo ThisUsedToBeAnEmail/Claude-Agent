@@ -23,7 +23,10 @@ use Marlin
             utf8     => 1,
             error_cb => sub {
                 my ($action, $error, $data) = @_;
-                warn "JSON::Lines $action error: $error" if $ENV{CLAUDE_AGENT_DEBUG};
+                # Only warn at debug level 2+ since parse errors are common
+                # with streaming JSON and partial data
+                warn "JSON::Lines $action error: $error"
+                    if $ENV{CLAUDE_AGENT_DEBUG} && $ENV{CLAUDE_AGENT_DEBUG} > 1;
                 return undef;
             },
         )
@@ -227,8 +230,9 @@ sub _build_command {
         }
 
         if (%servers) {
-            require Cpanel::JSON::XS;
-            push @cmd, '--mcp-config', Cpanel::JSON::XS::encode_json({ mcpServers => \%servers });
+            my $json = $self->_jsonl->encode([{ mcpServers => \%servers }]);
+            chomp $json;
+            push @cmd, '--mcp-config', $json;
         }
     }
 
@@ -240,8 +244,9 @@ sub _build_command {
             $agents{$name} = $agent->can('to_hash') ? $agent->to_hash : $agent;
         }
         if (%agents) {
-            require Cpanel::JSON::XS;
-            push @cmd, '--agents', Cpanel::JSON::XS::encode_json(\%agents);
+            my $json = $self->_jsonl->encode([\%agents]);
+            chomp $json;
+            push @cmd, '--agents', $json;
         }
     }
 
@@ -254,8 +259,9 @@ sub _build_command {
     if ($opts->has_output_format && $opts->output_format) {
         my $format = $opts->output_format;
         if (ref $format eq 'HASH' && $format->{schema}) {
-            require Cpanel::JSON::XS;
-            push @cmd, '--json-schema', Cpanel::JSON::XS::encode_json($format->{schema});
+            my $json = $self->_jsonl->encode([$format->{schema}]);
+            chomp $json;
+            push @cmd, '--json-schema', $json;
         }
     }
 
@@ -338,10 +344,29 @@ sub _handle_line {
 
     # Use JSON::Lines decode method for single line
     my @decoded = $self->_jsonl->decode($line);
+    if ($ENV{CLAUDE_AGENT_DEBUG} && $ENV{CLAUDE_AGENT_DEBUG} > 1) {
+        warn "DEBUG: Raw line length: " . length($line) . "\n";
+        warn "DEBUG: Raw line: $line\n";
+        warn "DEBUG: Decoded " . scalar(@decoded) . " objects\n";
+        warn "DEBUG: JSON::Lines buffer remaining: " . length($self->_jsonl->remaining) . " chars\n";
+        if ($self->_jsonl->remaining) {
+            warn "DEBUG: Buffer content (first 200): " . substr($self->_jsonl->remaining, 0, 200) . "\n";
+        }
+    }
     return unless @decoded;
 
     for my $data (@decoded) {
+        if ($ENV{CLAUDE_AGENT_DEBUG} && $ENV{CLAUDE_AGENT_DEBUG} > 1) {
+            warn "DEBUG: Decoded item ref type: " . (ref($data) // "not a ref") . "\n";
+            if (ref $data eq 'HASH') {
+                warn "DEBUG: Hash keys: " . join(", ", keys %$data) . "\n";
+            }
+        }
         next unless defined $data && ref $data eq 'HASH';
+        if ($ENV{CLAUDE_AGENT_DEBUG} && $ENV{CLAUDE_AGENT_DEBUG} > 1) {
+            warn "DEBUG: Message type in data: " . ($data->{type} // "undef") . "\n";
+        }
+        next unless exists $data->{type};  # Skip malformed/partial JSON data
 
         my $msg = Claude::Agent::Message->from_json($data);
 

@@ -1,0 +1,31 @@
+# Build artifacts
+blib/
+_build/
+Build
+Build.bat
+Makefile
+Makefile.old
+pm_to_blib
+MYMETA.*
+MANIFEST.SKIP
+
+# Distribution
+*.tar.gz
+Claude-Agent-*
+MANIFEST.bak
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Testing
+cover_db/
+nytprof*
+*.out
+
+# Separate repositories (not part of this repo)
+/Claude-Agent-Code-Review/
+/JSON-Lines/

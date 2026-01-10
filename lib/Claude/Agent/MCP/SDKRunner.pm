@@ -5,7 +5,7 @@ use strict;
 use warnings;
 
 use IO::Socket::UNIX;
-use Cpanel::JSON::XS qw(decode_json encode_json);
+use JSON::Lines;
 
 =head1 NAME
 
@@ -28,6 +28,7 @@ process by the Claude CLI.
 my $socket;
 my $request_id = 0;
 my %pending_requests;
+my $jsonl = JSON::Lines->new;
 
 sub run {
     binmode(STDIN,  ':raw');
@@ -41,7 +42,7 @@ sub run {
         die "Usage: SDKRunner <socket_path> <server_name> <version> <tools_json>\n";
     }
 
-    my $tools = decode_json($tools_json);
+    my ($tools) = $jsonl->decode($tools_json);
 
     # Build tool lookup
     my %tool_by_name = map { $_->{name} => $_ } @$tools;
@@ -63,20 +64,21 @@ sub run {
 
         warn "SDKRunner: Received: $line\n" if $ENV{CLAUDE_AGENT_DEBUG};
 
-        my $request;
-        eval { $request = decode_json($line); };
+        my @requests = eval { $jsonl->decode($line) };
         if ($@) {
             warn "SDKRunner: Failed to parse JSON: $@\n";
             next;
         }
 
-        my $response = handle_mcp_request($request, \%tool_by_name, $server_name, $version, $tools);
+        for my $request (@requests) {
+            my $response = handle_mcp_request($request, \%tool_by_name, $server_name, $version, $tools);
 
-        if ($response) {
-            my $json = encode_json($response);
-            warn "SDKRunner: Sending: $json\n" if $ENV{CLAUDE_AGENT_DEBUG};
-            print "$json\n";
-            STDOUT->flush();
+            if ($response) {
+                my $json = $jsonl->encode([$response]);
+                warn "SDKRunner: Sending: $json\n" if $ENV{CLAUDE_AGENT_DEBUG};
+                print $json;
+                STDOUT->flush();
+            }
         }
     }
 
@@ -181,15 +183,15 @@ sub call_parent_handler {
     $request_id++;
 
     # Send request to parent
-    my $request = encode_json({
+    my $request = $jsonl->encode([{
         id   => $request_id,
         tool => $tool_name,
         args => $args,
-    });
+    }]);
 
     warn "SDKRunner: Sending to parent: $request\n" if $ENV{CLAUDE_AGENT_DEBUG};
 
-    $socket->print("$request\n");
+    $socket->print($request);
     $socket->flush();
 
     # Read response from parent
@@ -205,8 +207,7 @@ sub call_parent_handler {
         };
     }
 
-    my $response;
-    eval { $response = decode_json($response_line); };
+    my ($response) = eval { $jsonl->decode($response_line) };
     if ($@) {
         return {
             content => [{ type => 'text', text => "Failed to parse handler response: $@" }],

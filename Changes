@@ -1,5 +1,11 @@
 Revision history for Claude-Agent
 
+0.04    2026-01-10
+        - Fixed JSON::Lines encode() calls to properly wrap hashrefs in arrays
+        - Added comprehensive MCP documentation with architecture diagram
+        - Added step-by-step tool creation guide and complete examples
+        - Fixed SDKRunner, SDKServer, and Query to use correct encode() API
+
 0.03    2026-01-10
         - SDK MCP tools now execute locally via Unix socket IPC
         - Added Claude::Agent::MCP::SDKServer for socket-based tool execution

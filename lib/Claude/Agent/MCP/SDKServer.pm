@@ -5,7 +5,7 @@ use strict;
 use warnings;
 
 use IO::Socket::UNIX;
-use Cpanel::JSON::XS qw(encode_json decode_json);
+use JSON::Lines;
 use File::Temp qw(tempdir);
 use File::Spec;
 
@@ -42,7 +42,8 @@ use Marlin
     'loop!',             # IO::Async::Loop
     '_socket_path==.',   # Path to Unix socket
     '_listener==.',      # IO::Async listener
-    '_temp_dir==.';      # Temp directory for socket
+    '_temp_dir==.',      # Temp directory for socket
+    '_jsonl==.';         # JSON::Lines instance
 
 sub BUILD {
     my ($self) = @_;
@@ -53,6 +54,8 @@ sub BUILD {
 
     my $socket_path = File::Spec->catfile($temp_dir, 'sdk.sock');
     $self->_socket_path($socket_path);
+
+    $self->_jsonl(JSON::Lines->new);
 }
 
 =head2 socket_path
@@ -85,7 +88,8 @@ sub to_stdio_config {
         };
     }
 
-    my $tools_json = encode_json(\@tools);
+    my $tools_json = $self->_jsonl->encode(\@tools);
+    chomp $tools_json;
 
     return {
         type    => 'stdio',
@@ -159,41 +163,42 @@ sub start {
 sub _handle_request {
     my ($self, $stream, $line) = @_;
 
-    my $request;
-    eval { $request = decode_json($line); };
+    my @requests = eval { $self->_jsonl->decode($line) };
     if ($@) {
         warn "SDKServer: Failed to parse request: $@\n" if $ENV{CLAUDE_AGENT_DEBUG};
         return;
     }
 
-    my $tool_name = $request->{tool};
-    my $args      = $request->{args} // {};
-    my $request_id = $request->{id};
+    for my $request (@requests) {
+        my $tool_name = $request->{tool};
+        my $args      = $request->{args} // {};
+        my $request_id = $request->{id};
 
-    warn "SDKServer: Executing tool '$tool_name'\n" if $ENV{CLAUDE_AGENT_DEBUG};
+        warn "SDKServer: Executing tool '$tool_name'\n" if $ENV{CLAUDE_AGENT_DEBUG};
 
-    # Find and execute the tool
-    my $tool = $self->server->get_tool($tool_name);
+        # Find and execute the tool
+        my $tool = $self->server->get_tool($tool_name);
 
-    my $result;
-    if ($tool) {
-        $result = $tool->execute($args);
+        my $result;
+        if ($tool) {
+            $result = $tool->execute($args);
+        }
+        else {
+            $result = {
+                content  => [{ type => 'text', text => "Unknown tool: $tool_name" }],
+                is_error => 1,
+            };
+        }
+
+        # Send response back
+        my $response = $self->_jsonl->encode([{
+            id      => $request_id,
+            content => $result->{content} // [],
+            isError => $result->{is_error} ? \1 : \0,
+        }]);
+
+        $stream->write($response);
     }
-    else {
-        $result = {
-            content  => [{ type => 'text', text => "Unknown tool: $tool_name" }],
-            is_error => 1,
-        };
-    }
-
-    # Send response back
-    my $response = encode_json({
-        id      => $request_id,
-        content => $result->{content} // [],
-        isError => $result->{is_error} ? \1 : \0,
-    });
-
-    $stream->write("$response\n");
 }
 
 =head2 stop
