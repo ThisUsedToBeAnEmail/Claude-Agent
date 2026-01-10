@@ -1,5 +1,11 @@
 Revision history for Claude-Agent
 
+0.05    2026-01-10
+        - Added Claude::Agent::Code::Review module for AI-powered code review
+        - Perl::Critic integration for deterministic static analysis
+        - False positive filtering with custom filter support
+        - Structured output with Issue and Report objects
+
 0.04    2026-01-10
         - Fixed JSON::Lines encode() calls to properly wrap hashrefs in arrays
         - Added comprehensive MCP documentation with architecture diagram

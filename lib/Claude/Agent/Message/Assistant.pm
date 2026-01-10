@@ -5,6 +5,7 @@ use strict;
 use warnings;
 
 use Types::Common -types;
+use Scalar::Util qw(blessed);
 use Claude::Agent::Content;
 use Marlin
     -base => 'Claude::Agent::Message::Base',
@@ -46,6 +47,10 @@ Represents an assistant (Claude) message in the conversation.
 
 Returns arrayref of content blocks from the message.
 
+B<Note:> Results are cached on first access. If the underlying message content
+is modified after this method is called, the cached value will be returned
+on subsequent calls. Messages are typically immutable after creation.
+
 =head3 text
 
     my $text = $msg->text;
@@ -66,7 +71,8 @@ sub content_blocks {
     # Return cached if available
     return $self->_content_blocks_cache if $self->_content_blocks_cache;
 
-    my $raw = $self->message->{content} // [];
+    my $raw = $self->message->{content};
+    $raw = [] unless ref($raw) eq 'ARRAY';
 
     # Convert hashrefs to Content objects
     my @blocks = map {
@@ -83,10 +89,10 @@ sub text {
     my ($self) = @_;
     my @texts;
     for my $block (@{$self->content_blocks}) {
-        if (ref($block) && $block->can('text') && $block->type eq 'text') {
+        if (blessed($block) && $block->can('type') && $block->type eq 'text' && $block->can('text')) {
             push @texts, $block->text;
         }
-        elsif (ref($block) eq 'HASH' && $block->{type} eq 'text') {
+        elsif (defined $block && ref($block) eq 'HASH' && defined $block->{type} && $block->{type} eq 'text' && defined $block->{text}) {
             push @texts, $block->{text};
         }
     }
@@ -97,8 +103,8 @@ sub tool_uses {
     my ($self) = @_;
     return [
         grep {
-            (ref($_) && $_->can('type') && $_->type eq 'tool_use')
-            || (ref($_) eq 'HASH' && $_->{type} eq 'tool_use')
+            (blessed($_) && $_->can('type') && $_->type eq 'tool_use')
+            || (ref($_) eq 'HASH' && defined $_->{type} && $_->{type} eq 'tool_use')
         } @{$self->content_blocks}
     ];
 }

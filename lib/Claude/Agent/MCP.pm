@@ -424,7 +424,9 @@ This shows:
         sub {
             my ($args) = @_;
             my $table = $args->{table};
-            my ($count) = $dbh->selectrow_array("SELECT COUNT(*) FROM $table");
+            # Use quote_identifier for safe table name interpolation
+            my $quoted = $dbh->quote_identifier($table);
+            my ($count) = $dbh->selectrow_array("SELECT COUNT(*) FROM $quoted");
             return {
                 content => [{ type => 'text', text => "Table $table has $count records" }],
             };

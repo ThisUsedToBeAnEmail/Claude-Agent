@@ -90,18 +90,22 @@ sub is_mcp_tool {
 
 sub mcp_server {
     my ($self) = @_;
-    if ($self->name =~ /^mcp__([^_]+)__/) {
+    # Split on first occurrence of double underscore after 'mcp__'
+    # Example: mcp__my_server__my__tool -> server=my_server, tool=my__tool
+    if ($self->name =~ /^mcp__(.+?)__(.+)$/) {
         return $1;
     }
-    return undef;
+    return;
 }
 
 sub mcp_tool_name {
     my ($self) = @_;
-    if ($self->name =~ /^mcp__[^_]+__(.+)$/) {
-        return $1;
+    # Split on first occurrence of double underscore after 'mcp__'
+    # Example: mcp__my_server__my__tool -> server=my_server, tool=my__tool
+    if ($self->name =~ /^mcp__(.+?)__(.+)$/) {
+        return $2;
     }
-    return undef;
+    return;
 }
 
 =head1 AUTHOR

@@ -36,7 +36,8 @@ Permission result that denies the tool execution.
 sub BUILD {
     my ($self) = @_;
     # Force behavior to 'deny'
-    $self->{behavior} = 'deny';
+    $self->behavior('deny');
+    return;
 }
 
 =head2 METHODS
@@ -51,11 +52,12 @@ Convert the result to a hash for JSON serialization.
 
 sub to_hash {
     my ($self) = @_;
-    return {
+    my $hash = {
         behavior  => 'deny',
-        message   => $self->message,
         interrupt => $self->interrupt ? \1 : \0,
     };
+    $hash->{message} = $self->message if $self->has_message;
+    return $hash;
 }
 
 =head1 AUTHOR

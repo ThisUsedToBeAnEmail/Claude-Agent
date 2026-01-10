@@ -11,10 +11,10 @@ use Marlin
     'disallowed_tools?' => ArrayRef[Str],    # Tools Claude cannot use
 
     # System prompt configuration
-    'system_prompt?',                         # String or hashref with preset
+    'system_prompt?' => Str | HashRef,        # String or hashref with preset
 
     # Permission settings
-    'permission_mode?' => Str,                # default, acceptEdits, bypassPermissions, dontAsk
+    'permission_mode?' => Enum['default', 'acceptEdits', 'bypassPermissions', 'dontAsk', 'plan'],
 
     # MCP server configuration
     'mcp_servers?' => HashRef,                # Server name => config hashref
@@ -23,7 +23,7 @@ use Marlin
     'hooks?' => HashRef,                      # Event name => arrayref of matchers
 
     # Permission callback
-    'can_use_tool?',                          # Coderef for permission prompts
+    'can_use_tool?' => CodeRef,               # Coderef for permission prompts
 
     # Working directory
     'cwd?' => Str,                            # Working directory for agent
@@ -54,7 +54,10 @@ use Marlin
     'include_partial_messages?' => Bool,
 
     # Continue conversation from previous messages
-    'continue_conversation?' => Bool;
+    'continue_conversation?' => Bool,
+
+    # Query timeout in seconds (default 600 = 10 minutes)
+    'query_timeout?' => Int;
 
 =head1 NAME
 
@@ -177,6 +180,15 @@ Boolean. If true, include partial messages during streaming.
 
 Boolean. If true, continue from previous conversation messages.
 
+=head2 query_timeout
+
+Timeout in seconds for the C<next()> method to wait for messages.
+Defaults to 600 seconds (10 minutes). Set to a lower value for
+interactive applications, or higher for complex long-running queries.
+
+The MCP tool handler timeout can be configured via the
+C<CLAUDE_AGENT_TOOL_TIMEOUT> environment variable (default 60 seconds).
+
 =head1 METHODS
 
 =head2 to_hash
@@ -211,16 +223,20 @@ sub to_hash {
     # Handle MCP servers
     if ($self->has_mcp_servers) {
         $hash{mcpServers} = {
-            map { $_ => $self->mcp_servers->{$_}->to_hash }
-            keys %{$self->mcp_servers}
+            map {
+                my $server = $self->mcp_servers->{$_};
+                $_ => ($server->can('to_hash') ? $server->to_hash : $server)
+            } keys %{$self->mcp_servers}
         };
     }
 
     # Handle agents (subagents)
     if ($self->has_agents) {
         $hash{agents} = {
-            map { $_ => $self->agents->{$_}->to_hash }
-            keys %{$self->agents}
+            map {
+                my $agent = $self->agents->{$_};
+                $_ => ($agent->can('to_hash') ? $agent->to_hash : $agent)
+            } keys %{$self->agents}
         };
     }
 

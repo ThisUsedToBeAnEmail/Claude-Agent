@@ -19,11 +19,11 @@ Claude::Agent - Perl SDK for the Claude Agent SDK
 
 =head1 VERSION
 
-Version 0.04
+Version 0.05
 
 =cut
 
-our $VERSION = '0.04';
+our $VERSION = '0.05';
 
 =head1 SYNOPSIS
 
@@ -138,8 +138,10 @@ This allows multiple queries to share the same event loop.
 sub query {
     my (%args) = @_;
 
-    my $prompt = $args{prompt}
-        or die "query() requires a 'prompt' argument";
+    my $prompt = $args{prompt};
+    Claude::Agent::Error->throw(
+        message => "query() requires a 'prompt' argument"
+    ) unless defined $prompt && length $prompt;
 
     my $options = $args{options} // Claude::Agent::Options->new();
 
@@ -231,6 +233,22 @@ A L<Claude::Agent::MCP::ToolDefinition> object.
 
 sub tool {
     my ($name, $description, $input_schema, $handler) = @_;
+
+    Claude::Agent::Error->throw(
+        message => "tool() requires a name argument"
+    ) unless defined $name && length $name;
+
+    Claude::Agent::Error->throw(
+        message => "tool() requires a description argument"
+    ) unless defined $description;
+
+    Claude::Agent::Error->throw(
+        message => "tool() requires an input_schema hashref"
+    ) unless ref $input_schema eq 'HASH';
+
+    Claude::Agent::Error->throw(
+        message => "tool() requires a handler coderef"
+    ) unless ref $handler eq 'CODE';
 
     require Claude::Agent::MCP;
     return Claude::Agent::MCP::ToolDefinition->new(

@@ -10,7 +10,6 @@ my %WriteMakefileArgs = (
     ABSTRACT         => 'Perl SDK for the Claude Agent SDK',
     LICENSE          => 'artistic_2',
     MIN_PERL_VERSION => '5.020',
-    macro => { TARFLAGS   => "--format=ustar -c -v -f" },
     CONFIGURE_REQUIRES => {
         'ExtUtils::MakeMaker' => '0',
     },
@@ -21,14 +20,25 @@ my %WriteMakefileArgs = (
     },
     PREREQ_PM => {
         'Marlin'             => '0.007000',
-        'JSON::Lines'        => '1.09',
+        'JSON::Lines'        => '1.10',
         'IO::Async'          => '0.80',
         'Future::AsyncAwait' => '0.60',
         'Type::Tiny'         => '2.0',
         'Types::Common'      => '2.0',
         'Try::Tiny'          => '0.30',
         'File::Which'        => '1.27',
+        'Const::XS'          => '1.03',
         'namespace::clean'   => '0.27',
+    },
+    META_MERGE => {
+        'meta-spec' => { version => 2 },
+        resources => {
+            repository => {
+                type => 'git',
+                url  => 'https://github.com/lnation/Claude-Agent.git',
+                web  => 'https://github.com/lnation/Claude-Agent',
+            },
+        },
     },
     dist  => { COMPRESS => 'gzip -9f', SUFFIX => 'gz', },
     clean => { FILES => 'Claude-Agent-*' },

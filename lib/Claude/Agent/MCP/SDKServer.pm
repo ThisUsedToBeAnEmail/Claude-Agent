@@ -4,10 +4,13 @@ use 5.020;
 use strict;
 use warnings;
 
+use Errno qw(ENOENT);
 use IO::Socket::UNIX;
 use JSON::Lines;
 use File::Temp qw(tempdir);
 use File::Spec;
+use Cwd qw(abs_path);
+use Try::Tiny;
 
 =head1 NAME
 
@@ -56,6 +59,7 @@ sub BUILD {
     $self->_socket_path($socket_path);
 
     $self->_jsonl(JSON::Lines->new);
+    return;
 }
 
 =head2 socket_path
@@ -88,7 +92,9 @@ sub to_stdio_config {
         };
     }
 
-    my $tools_json = $self->_jsonl->encode(\@tools);
+    # Encode tools as a single JSON array (not JSON Lines format)
+    # We pass [[\@tools]] to get a single line containing the array
+    my $tools_json = $self->_jsonl->encode([\@tools]);
     chomp $tools_json;
 
     return {
@@ -105,7 +111,19 @@ sub to_stdio_config {
             $tools_json,
         ],
         env => {
-            PERL5LIB => join(':', @INC),
+            # Filter @INC to trusted absolute paths with strict validation
+            # Limit to first 20 entries to prevent injection via appended paths
+            PERL5LIB => join(':', grep {
+                my $path = $_;
+                # Must be defined, absolute, and an existing directory
+                defined $path && $path =~ m{^/} && -d $path && do {
+                    my $real = abs_path($path);
+                    # Resolved path must also be absolute and exist
+                    # Reject paths with suspicious components
+                    $real && $real =~ m{^/} && -d $real
+                        && $real !~ m{/\.\.(/|$)}  # No parent traversal
+                }
+            } @INC[0 .. ($#INC > 19 ? 19 : $#INC)]),
         },
     };
 }
@@ -122,8 +140,11 @@ sub start {
     require IO::Async::Listener;
     require IO::Async::Stream;
 
-    # Remove existing socket if present
-    unlink $self->_socket_path if -e $self->_socket_path;
+    # Remove existing socket if present - use atomic unlink to avoid TOCTOU race
+    unlink $self->_socket_path or do {
+        die "Cannot remove existing path: " . $self->_socket_path . ": $!"
+            unless $! == ENOENT;
+    };
 
     my $listener = IO::Async::Listener->new(
         on_stream => sub {
@@ -133,7 +154,7 @@ sub start {
                 on_read => sub {
                     my ($stream, $buffref) = @_;
 
-                    while ($$buffref =~ s/^(.+)\n//) {
+                    while ($$buffref =~ s/^([^\n]+)\n//) {
                         my $line = $1;
                         $self->_handle_request($stream, $line);
                     }
@@ -147,13 +168,18 @@ sub start {
 
     $self->loop->add($listener);
 
-    $listener->listen(
-        addr => {
-            family   => 'unix',
-            socktype => 'stream',
-            path     => $self->_socket_path,
-        },
-    )->get;
+    try {
+        $listener->listen(
+            addr => {
+                family   => 'unix',
+                socktype => 'stream',
+                path     => $self->_socket_path,
+            },
+        )->get;
+    } catch {
+        $self->loop->remove($listener);
+        die "Failed to start SDK server listener: $_";
+    };
 
     $self->_listener($listener);
 
@@ -163,9 +189,23 @@ sub start {
 sub _handle_request {
     my ($self, $stream, $line) = @_;
 
-    my @requests = eval { $self->_jsonl->decode($line) };
-    if ($@) {
-        warn "SDKServer: Failed to parse request: $@\n" if $ENV{CLAUDE_AGENT_DEBUG};
+    my @requests;
+    my $parse_error;
+    try {
+        @requests = $self->_jsonl->decode($line);
+    } catch {
+        $parse_error = $_;
+    };
+
+    if ($parse_error) {
+        warn "SDKServer: Failed to parse request: $parse_error\n" if $ENV{CLAUDE_AGENT_DEBUG};
+        # Use generic error message to avoid leaking sensitive data
+        my $error_response = $self->_jsonl->encode([{
+            id      => undef,
+            content => [{ type => 'text', text => 'Invalid JSON request' }],
+            isError => \1,
+        }]);
+        $stream->write($error_response);
         return;
     }
 
@@ -182,10 +222,20 @@ sub _handle_request {
         my $result;
         if ($tool) {
             $result = $tool->execute($args);
+            # Validate result structure
+            unless (ref $result eq 'HASH') {
+                $result = {
+                    content  => [{ type => 'text', text => 'Invalid handler result format' }],
+                    is_error => 1,
+                };
+            }
         }
         else {
+            # Sanitize tool name in error message (truncate, remove control chars)
+            my $safe_name = defined $tool_name ? substr($tool_name, 0, 100) : '<undefined>';
+            $safe_name =~ s/[[:cntrl:]]//g;
             $result = {
-                content  => [{ type => 'text', text => "Unknown tool: $tool_name" }],
+                content  => [{ type => 'text', text => "Unknown tool: $safe_name" }],
                 is_error => 1,
             };
         }
@@ -199,6 +249,7 @@ sub _handle_request {
 
         $stream->write($response);
     }
+    return;
 }
 
 =head2 stop
@@ -215,12 +266,15 @@ sub stop {
         $self->_listener(undef);
     }
 
-    unlink $self->_socket_path if -e $self->_socket_path;
+    # Unlink unconditionally - ignore ENOENT to avoid TOCTOU race
+    unlink $self->_socket_path;
+    return;
 }
 
 sub DEMOLISH {
     my ($self) = @_;
     $self->stop();
+    return;
 }
 
 =head1 AUTHOR

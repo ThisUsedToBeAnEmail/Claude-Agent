@@ -91,4 +91,49 @@ is(
     'client options are accessible'
 );
 
+# Test error types
+subtest 'Client error handling' => sub {
+    my $c = Claude::Agent::Client->new();
+
+    # Test error message for send on disconnected client
+    eval { $c->send('test') };
+    my $err = $@;
+    ok($err, 'send on disconnected throws');
+    like($err, qr/Not connected/, 'send error mentions connection');
+
+    # Test error message for receive on disconnected client
+    eval { $c->receive };
+    $err = $@;
+    ok($err, 'receive on disconnected throws');
+    like($err, qr/Not connected/, 'receive error mentions connection');
+
+    # Test receive_async on disconnected client
+    eval { $c->receive_async };
+    $err = $@;
+    ok($err, 'receive_async on disconnected throws');
+    like($err, qr/Not connected/, 'receive_async error mentions connection');
+};
+
+# Test connect/disconnect state management
+subtest 'Client state management' => sub {
+    my $c = Claude::Agent::Client->new();
+
+    ok(!$c->is_connected, 'new client not connected');
+    is($c->session_id, undef, 'new client has no session_id');
+
+    # Multiple disconnects are safe
+    $c->disconnect;
+    ok(!$c->is_connected, 'still not connected after disconnect');
+    $c->disconnect;
+    ok(!$c->is_connected, 'still not connected after second disconnect');
+};
+
+# Test that resume requires not being connected
+subtest 'Resume requires not connected' => sub {
+    my $c = Claude::Agent::Client->new();
+
+    # Can't test actual resume without CLI, but can verify method exists
+    can_ok($c, 'resume');
+};
+
 done_testing();

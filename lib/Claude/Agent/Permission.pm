@@ -4,6 +4,7 @@ use 5.020;
 use strict;
 use warnings;
 
+use Exporter qw(import);
 use Types::Common -types;
 
 # Load subclasses
@@ -73,15 +74,14 @@ including factory methods for creating permission responses.
 =cut
 
 # Permission mode constants
-use constant {
-    MODE_DEFAULT     => 'default',
-    MODE_ACCEPT_EDIT => 'acceptEdits',
-    MODE_BYPASS      => 'bypassPermissions',
-    MODE_DONT_ASK    => 'dontAsk',
-};
+use Const::XS qw(const);
+const our $MODE_DEFAULT     => 'default';
+const our $MODE_ACCEPT_EDIT => 'acceptEdits';
+const our $MODE_BYPASS      => 'bypassPermissions';
+const our $MODE_DONT_ASK    => 'dontAsk';
 
 our @EXPORT_OK = qw(
-    MODE_DEFAULT MODE_ACCEPT_EDIT MODE_BYPASS MODE_DONT_ASK
+    $MODE_DEFAULT $MODE_ACCEPT_EDIT $MODE_BYPASS $MODE_DONT_ASK
 );
 
 =head1 CLASS METHODS

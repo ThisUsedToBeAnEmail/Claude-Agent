@@ -7,18 +7,18 @@ use Test::More;
 use Claude::Agent::Hook;
 
 # Test hook constants
-is(Claude::Agent::Hook::PRE_TOOL_USE, 'PreToolUse', 'PRE_TOOL_USE constant');
-is(Claude::Agent::Hook::POST_TOOL_USE, 'PostToolUse', 'POST_TOOL_USE constant');
-is(Claude::Agent::Hook::POST_TOOL_USE_FAIL, 'PostToolUseFailure', 'POST_TOOL_USE_FAIL constant');
-is(Claude::Agent::Hook::USER_PROMPT_SUBMIT, 'UserPromptSubmit', 'USER_PROMPT_SUBMIT constant');
-is(Claude::Agent::Hook::STOP, 'Stop', 'STOP constant');
-is(Claude::Agent::Hook::SUBAGENT_START, 'SubagentStart', 'SUBAGENT_START constant');
-is(Claude::Agent::Hook::SUBAGENT_STOP, 'SubagentStop', 'SUBAGENT_STOP constant');
-is(Claude::Agent::Hook::PRE_COMPACT, 'PreCompact', 'PRE_COMPACT constant');
-is(Claude::Agent::Hook::PERMISSION_REQUEST, 'PermissionRequest', 'PERMISSION_REQUEST constant');
-is(Claude::Agent::Hook::SESSION_START, 'SessionStart', 'SESSION_START constant');
-is(Claude::Agent::Hook::SESSION_END, 'SessionEnd', 'SESSION_END constant');
-is(Claude::Agent::Hook::NOTIFICATION, 'Notification', 'NOTIFICATION constant');
+is($Claude::Agent::Hook::PRE_TOOL_USE, 'PreToolUse', 'PRE_TOOL_USE constant');
+is($Claude::Agent::Hook::POST_TOOL_USE, 'PostToolUse', 'POST_TOOL_USE constant');
+is($Claude::Agent::Hook::POST_TOOL_USE_FAIL, 'PostToolUseFailure', 'POST_TOOL_USE_FAIL constant');
+is($Claude::Agent::Hook::USER_PROMPT_SUBMIT, 'UserPromptSubmit', 'USER_PROMPT_SUBMIT constant');
+is($Claude::Agent::Hook::STOP, 'Stop', 'STOP constant');
+is($Claude::Agent::Hook::SUBAGENT_START, 'SubagentStart', 'SUBAGENT_START constant');
+is($Claude::Agent::Hook::SUBAGENT_STOP, 'SubagentStop', 'SUBAGENT_STOP constant');
+is($Claude::Agent::Hook::PRE_COMPACT, 'PreCompact', 'PRE_COMPACT constant');
+is($Claude::Agent::Hook::PERMISSION_REQUEST, 'PermissionRequest', 'PERMISSION_REQUEST constant');
+is($Claude::Agent::Hook::SESSION_START, 'SessionStart', 'SESSION_START constant');
+is($Claude::Agent::Hook::SESSION_END, 'SessionEnd', 'SESSION_END constant');
+is($Claude::Agent::Hook::NOTIFICATION, 'Notification', 'NOTIFICATION constant');
 
 # Test Hook::Matcher
 my $matcher = Claude::Agent::Hook::Matcher->new(
@@ -119,11 +119,11 @@ my $error_matcher = Claude::Agent::Hook::Matcher->new(
 
 $results = $error_matcher->run_hooks({}, 'id', {});
 is($results->[0]{decision}, 'error', 'error caught and reported');
-like($results->[0]{error}, qr/Hook error!/, 'error message preserved');
+is($results->[0]{error}, 'Hook execution failed', 'error message sanitized');
 
 # Test Hook::Result factory methods
-my $continue_result = Claude::Agent::Hook::Result->continue();
-is($continue_result->{decision}, 'continue', 'Result::continue()');
+my $continue_result = Claude::Agent::Hook::Result->proceed();
+is($continue_result->{decision}, 'continue', 'Result::proceed()');
 
 my $allow_result = Claude::Agent::Hook::Result->allow(
     updated_input => { modified => 1 },

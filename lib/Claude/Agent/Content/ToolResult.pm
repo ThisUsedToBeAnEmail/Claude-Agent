@@ -7,9 +7,9 @@ use warnings;
 use Types::Common -types;
 use Marlin
     'type'         => sub { 'tool_result' },
-    'tool_use_id!' => Str,           # ID of the corresponding tool_use
-    'content!',                      # Result content (string or arrayref)
-    'is_error?'    => Bool;          # True if tool execution failed
+    'tool_use_id!' => Str,              # ID of the corresponding tool_use
+    'content!'     => Str | ArrayRef,   # Result content (string or arrayref of blocks)
+    'is_error?'    => Bool;             # True if tool execution failed
 
 =head1 NAME
 
@@ -41,6 +41,9 @@ A tool result content block containing the output from a tool execution.
 
 Helper to get text content from result.
 
+B<Note:> Only extracts text from string content or 'text' type blocks in
+array content. Other content types (e.g., 'image') are silently ignored.
+
 =cut
 
 sub text {
@@ -53,7 +56,7 @@ sub text {
     # If content is an arrayref, extract text blocks
     my @texts;
     for my $block (@$content) {
-        if (ref $block eq 'HASH' && $block->{type} eq 'text') {
+        if (ref $block eq 'HASH' && defined $block->{type} && $block->{type} eq 'text' && defined $block->{text}) {
             push @texts, $block->{text};
         }
     }

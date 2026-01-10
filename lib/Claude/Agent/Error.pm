@@ -58,7 +58,11 @@ sub throw {
 
 sub to_string {
     my ($self) = @_;
-    return ref($self) . ': ' . $self->message;
+    # Use short error type for cleaner output
+    my $type = ref($self);
+    $type =~ s/^Claude::Agent::Error:://;
+    $type ||= 'Error';
+    return "$type: " . $self->message;
 }
 
 use overload

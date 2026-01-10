@@ -6,7 +6,7 @@ use warnings;
 
 use Types::Common -types;
 use Marlin
-    'behavior' => Str;
+    'behavior==' => Str;  # rw attribute, no init_arg (set by subclasses)
 
 =head1 NAME
 

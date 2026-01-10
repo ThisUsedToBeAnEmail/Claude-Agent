@@ -4,6 +4,7 @@ use 5.020;
 use strict;
 use warnings;
 
+use Try::Tiny;
 use Types::Common -types;
 use Marlin
     'matcher',                    # Regex pattern for tool names (optional)
@@ -60,23 +61,63 @@ Defines a hook matcher that triggers callbacks for specific tools.
 
 Check if this matcher matches the given tool name.
 
+B<Note:> Regex timeout protection uses alarm() which only works on
+Unix-like systems. On Windows, malicious regex patterns may not be
+interrupted. Pattern length is also limited to 1000 characters to
+provide an additional layer of ReDoS protection.
+
 =cut
 
 sub matches {
     my ($self, $tool_name) = @_;
+
+    # Handle undefined tool name
+    return 0 unless defined $tool_name;
 
     # No matcher means match all
     return 1 unless defined $self->matcher;
 
     my $pattern = $self->matcher;
 
-    # If it's a simple string, do exact match
-    if ($pattern !~ /[.*+?\[\]{}|\\^$()]/) {
+    # If it's a simple string (no regex metacharacters), do exact match
+    # Use quotemeta to reliably detect plain strings vs regex patterns
+    if ($pattern eq quotemeta($pattern)) {
         return $tool_name eq $pattern;
     }
 
-    # Otherwise treat as regex
-    return $tool_name =~ /$pattern/;
+    # Otherwise treat as regex with timeout protection against ReDoS
+    # Use Try::Tiny with finally to ensure alarm is always cleared
+    my $result;
+    try {
+        # Validate pattern length to mitigate ReDoS
+        if (length($pattern) > 1000) {
+            die "Pattern too long\n";
+        }
+
+        # Detect potentially dangerous ReDoS patterns (works on all platforms)
+        # Look for nested quantifiers like (a+)+ or (a*)*
+        if ($pattern =~ /\([^)]*[+*][^)]*\)[+*]/ ||
+            $pattern =~ /\([^)]*\|[^)]*\)[+*]/) {
+            die "Potentially dangerous nested quantifier pattern\n";
+        }
+
+        # alarm() only works on Unix-like systems, skip on Windows
+        my $use_alarm = $^O ne 'MSWin32' && $^O ne 'cygwin';
+        if ($use_alarm) {
+            local $SIG{ALRM} = sub { die "Regex timeout\n" };
+            alarm(1);
+        }
+
+        my $compiled = qr/$pattern/;
+        $result = $tool_name =~ $compiled ? 1 : 0;
+
+        alarm(0) if $use_alarm;
+    } catch {
+        $result = 0;
+    } finally {
+        alarm(0) if $^O ne 'MSWin32' && $^O ne 'cygwin';
+    };
+    return $result // 0;
 }
 
 =head3 run_hooks
@@ -93,11 +134,19 @@ sub run_hooks {
     my @results;
 
     for my $hook (@{$self->hooks}) {
-        my $result = eval { $hook->($input_data, $tool_use_id, $context) };
-        if ($@) {
+        my ($result, $hook_error);
+        try {
+            $result = $hook->($input_data, $tool_use_id, $context);
+        } catch {
+            $hook_error = $_;
+        };
+
+        if ($hook_error) {
+            # Log full error for debugging, return sanitized message
+            warn "Hook error: $hook_error" if $ENV{CLAUDE_AGENT_DEBUG};
             push @results, {
                 decision => 'error',
-                error    => $@,
+                error    => 'Hook execution failed',
             };
         }
         else {
@@ -105,7 +154,7 @@ sub run_hooks {
         }
 
         # Stop if we got a definitive decision
-        last if $result && $result->{decision}
+        last if $result && ref($result) eq 'HASH' && $result->{decision}
             && $result->{decision} =~ /^(allow|deny)$/;
     }
 

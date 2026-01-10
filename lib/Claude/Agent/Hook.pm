@@ -4,6 +4,7 @@ use 5.020;
 use strict;
 use warnings;
 
+use Exporter qw(import);
 use Types::Common -types;
 
 # Load subclasses
@@ -91,26 +92,25 @@ tool calls in the Claude Agent SDK.
 =cut
 
 # Hook event constants
-use constant {
-    PRE_TOOL_USE         => 'PreToolUse',
-    POST_TOOL_USE        => 'PostToolUse',
-    POST_TOOL_USE_FAIL   => 'PostToolUseFailure',
-    USER_PROMPT_SUBMIT   => 'UserPromptSubmit',
-    STOP                 => 'Stop',
-    SUBAGENT_START       => 'SubagentStart',
-    SUBAGENT_STOP        => 'SubagentStop',
-    PRE_COMPACT          => 'PreCompact',
-    PERMISSION_REQUEST   => 'PermissionRequest',
-    SESSION_START        => 'SessionStart',
-    SESSION_END          => 'SessionEnd',
-    NOTIFICATION         => 'Notification',
-};
+use Const::XS qw(const);
+const our $PRE_TOOL_USE         => 'PreToolUse';
+const our $POST_TOOL_USE        => 'PostToolUse';
+const our $POST_TOOL_USE_FAIL   => 'PostToolUseFailure';
+const our $USER_PROMPT_SUBMIT   => 'UserPromptSubmit';
+const our $STOP                 => 'Stop';
+const our $SUBAGENT_START       => 'SubagentStart';
+const our $SUBAGENT_STOP        => 'SubagentStop';
+const our $PRE_COMPACT          => 'PreCompact';
+const our $PERMISSION_REQUEST   => 'PermissionRequest';
+const our $SESSION_START        => 'SessionStart';
+const our $SESSION_END          => 'SessionEnd';
+const our $NOTIFICATION         => 'Notification';
 
 our @EXPORT_OK = qw(
-    PRE_TOOL_USE POST_TOOL_USE POST_TOOL_USE_FAIL
-    USER_PROMPT_SUBMIT STOP SUBAGENT_START SUBAGENT_STOP
-    PRE_COMPACT PERMISSION_REQUEST SESSION_START SESSION_END
-    NOTIFICATION
+    $PRE_TOOL_USE $POST_TOOL_USE $POST_TOOL_USE_FAIL
+    $USER_PROMPT_SUBMIT $STOP $SUBAGENT_START $SUBAGENT_STOP
+    $PRE_COMPACT $PERMISSION_REQUEST $SESSION_START $SESSION_END
+    $NOTIFICATION
 );
 
 =head1 AUTHOR

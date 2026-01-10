@@ -17,7 +17,7 @@ use Marlin
     'output_style?'        => Str,
     'plugins?'             => ArrayRef,
     'model?'               => Str,
-    'mcp_servers?'         => Any,       # Can be arrayref or hashref
+    'mcp_servers?'         => ArrayRef | HashRef,  # JSON format varies by CLI version
     'api_key_source?'      => Str,
     'skills?'              => ArrayRef,
     'permission_mode?'     => Str,
@@ -60,6 +60,10 @@ Represents a system message from the SDK.
 
 =item * mcp_servers - MCP server configurations (init)
 
+B<Note:> The JSON format from the CLI may be an ArrayRef or HashRef depending
+on the CLI version. This differs from L<Claude::Agent::Options> which uses
+HashRef for user-facing configuration.
+
 =item * api_key_source - Source of API key (init)
 
 =item * skills - Available skills (init)
@@ -98,7 +102,7 @@ Helper for init messages to get session_id from data.
 
 sub get_session_id {
     my ($self) = @_;
-    return $self->session_id // ($self->data ? $self->data->{session_id} : undef);
+    return $self->session_id // ($self->has_data && $self->data ? $self->data->{session_id} : undef);
 }
 
 =head1 AUTHOR

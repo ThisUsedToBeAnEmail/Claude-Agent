@@ -15,6 +15,7 @@ use Marlin
 use Claude::Agent::Options;
 use Claude::Agent::Query;
 use Claude::Agent::Message;
+use Claude::Agent::Error;
 
 =head1 NAME
 
@@ -78,10 +79,11 @@ Start a new session with the given prompt.
 
 =cut
 
+## no critic (ProhibitBuiltinHomonyms)
 sub connect {
     my ($self, $prompt) = @_;
 
-    die "Already connected" if $self->_connected;
+    Claude::Agent::Error->throw(message => 'Already connected') if $self->_connected;
 
     $self->_query(
         Claude::Agent::Query->new(
@@ -132,20 +134,19 @@ Blocking call to receive the next message. Returns undef when no more messages.
 sub receive {
     my ($self) = @_;
 
-    die "Not connected" unless $self->_connected;
+    Claude::Agent::Error->throw(message => 'Not connected') unless $self->_connected;
+    Claude::Agent::Error->throw(message => 'Query not initialized') unless $self->_query;
 
     my $msg = $self->_query->next;
 
-    # Capture session_id
-    if ($msg && $msg->isa('Claude::Agent::Message::System')
-        && $msg->subtype eq 'init') {
-        $self->_session_id($msg->get_session_id);
+    # Capture session_id from any system message that has one
+    if ($msg && $msg->isa('Claude::Agent::Message::System')) {
+        my $sid = $msg->get_session_id;
+        $self->_session_id($sid) if $sid;
     }
 
-    # Check for result (end of this turn)
-    if ($msg && $msg->isa('Claude::Agent::Message::Result')) {
-        # Session continues, but this query is done
-    }
+    # Result messages indicate end of current query turn
+    # No additional handling needed - caller should check message type
 
     return $msg;
 }
@@ -161,7 +162,8 @@ Async call to receive the next message. Returns a Future.
 sub receive_async {
     my ($self) = @_;
 
-    die "Not connected" unless $self->_connected;
+    Claude::Agent::Error->throw(message => 'Not connected') unless $self->_connected;
+    Claude::Agent::Error->throw(message => 'Query not initialized') unless $self->_query;
 
     return $self->_query->next_async;
 }
@@ -194,10 +196,14 @@ Send a follow-up message in the current session.
 
 =cut
 
+## no critic (ProhibitBuiltinHomonyms)
 sub send {
     my ($self, $content) = @_;
 
-    die "Not connected" unless $self->_connected;
+    Claude::Agent::Error->throw(message => 'Not connected') unless $self->_connected;
+    Claude::Agent::Error->throw(message => 'No active query') unless $self->_query;
+    Claude::Agent::Error->throw(message => 'Query has finished')
+        if $self->_query->is_finished;
 
     $self->_query->send_user_message($content);
     return $self;
@@ -231,6 +237,7 @@ sub disconnect {
     my ($self) = @_;
 
     $self->_query(undef);
+    $self->_session_id(undef);
     $self->_connected(0);
     return $self;
 }
@@ -246,14 +253,19 @@ Resume a previous session.
 sub resume {
     my ($self, $session_id, $prompt) = @_;
 
-    die "Already connected" if $self->_connected;
+    Claude::Agent::Error->throw(message => 'Already connected') if $self->_connected;
 
-    # Create new options with resume
+    # Create new options with resume, preserving all relevant options
     my $opts = $self->options;
     my $resume_opts = Claude::Agent::Options->new(
         ($opts->has_allowed_tools ? (allowed_tools => $opts->allowed_tools) : ()),
         ($opts->has_model ? (model => $opts->model) : ()),
         ($opts->has_permission_mode ? (permission_mode => $opts->permission_mode) : ()),
+        ($opts->has_mcp_servers ? (mcp_servers => $opts->mcp_servers) : ()),
+        ($opts->has_hooks ? (hooks => $opts->hooks) : ()),
+        ($opts->has_agents ? (agents => $opts->agents) : ()),
+        ($opts->has_max_turns ? (max_turns => $opts->max_turns) : ()),
+        ($opts->has_system_prompt ? (system_prompt => $opts->system_prompt) : ()),
         resume => $session_id,
     );
 

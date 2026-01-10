@@ -52,7 +52,7 @@ my $error_tool = Claude::Agent::MCP::ToolDefinition->new(
 
 $result = $error_tool->execute({});
 ok($result->{is_error}, 'error tool returns is_error');
-like($result->{content}[0]{text}, qr/Intentional error/, 'error message preserved');
+like($result->{content}[0]{text}, qr/Error executing tool: failing/, 'error message includes tool name');
 
 # Test MCP::Server (SDK type)
 my $server = Claude::Agent::MCP::Server->new(
@@ -133,6 +133,52 @@ is_deeply($http_server->headers, { 'X-API-Key' => 'secret' }, 'http headers');
 $hash = $http_server->to_hash;
 is($hash->{type}, 'http', 'http to_hash type');
 is($hash->{url}, 'https://api.example.com/mcp', 'http to_hash url');
+
+# Test sensitive header detection and redaction
+subtest 'Sensitive header handling' => sub {
+    # SSE server with sensitive headers
+    my $sse_with_auth = Claude::Agent::MCP::SSEServer->new(
+        url     => 'https://api.example.com/sse',
+        headers => {
+            Authorization   => 'Bearer secret-token-123',
+            'X-API-Key'     => 'api-key-456',
+            'Content-Type'  => 'application/json',
+            'X-Custom-Auth' => 'custom-value',
+        },
+        sensitive_headers => ['X-Custom-Auth'],
+    );
+
+    # Test is_sensitive_header
+    ok($sse_with_auth->is_sensitive_header('Authorization'), 'Authorization is sensitive');
+    ok($sse_with_auth->is_sensitive_header('authorization'), 'authorization (lowercase) is sensitive');
+    ok($sse_with_auth->is_sensitive_header('X-API-Key'), 'X-API-Key is sensitive');
+    ok($sse_with_auth->is_sensitive_header('x-api-key'), 'x-api-key is sensitive');
+    ok($sse_with_auth->is_sensitive_header('X-Custom-Auth'), 'explicitly marked header is sensitive');
+    ok(!$sse_with_auth->is_sensitive_header('Content-Type'), 'Content-Type is not sensitive');
+    ok(!$sse_with_auth->is_sensitive_header(undef), 'undef is not sensitive');
+
+    # Test redacted_headers
+    my $redacted = $sse_with_auth->redacted_headers;
+    is($redacted->{Authorization}, '[REDACTED]', 'Authorization redacted');
+    is($redacted->{'X-API-Key'}, '[REDACTED]', 'X-API-Key redacted');
+    is($redacted->{'Content-Type'}, 'application/json', 'Content-Type not redacted');
+    is($redacted->{'X-Custom-Auth'}, '[REDACTED]', 'custom sensitive header redacted');
+
+    # to_hash still returns real values (needed for CLI)
+    my $real_hash = $sse_with_auth->to_hash;
+    is($real_hash->{headers}{Authorization}, 'Bearer secret-token-123', 'to_hash returns real values');
+
+    # HTTP server with same functionality
+    my $http_with_auth = Claude::Agent::MCP::HTTPServer->new(
+        url     => 'https://api.example.com/mcp',
+        headers => {
+            'X-Secret-Token' => 'my-secret',
+        },
+    );
+    ok($http_with_auth->is_sensitive_header('X-Secret-Token'), 'token pattern matched');
+    $redacted = $http_with_auth->redacted_headers;
+    is($redacted->{'X-Secret-Token'}, '[REDACTED]', 'HTTP server redacts sensitive headers');
+};
 
 # Test integration with Options
 use Claude::Agent::Options;

@@ -36,7 +36,8 @@ Permission result that allows the tool to execute.
 sub BUILD {
     my ($self) = @_;
     # Force behavior to 'allow'
-    $self->{behavior} = 'allow';
+    $self->behavior('allow');
+    return;
 }
 
 =head2 METHODS
@@ -51,11 +52,10 @@ Convert the result to a hash for JSON serialization.
 
 sub to_hash {
     my ($self) = @_;
-    return {
-        behavior            => 'allow',
-        updatedInput        => $self->updated_input,
-        updatedPermissions  => $self->updated_permissions,
-    };
+    my $hash = { behavior => 'allow' };
+    $hash->{updatedInput} = $self->updated_input if $self->has_updated_input;
+    $hash->{updatedPermissions} = $self->updated_permissions if $self->has_updated_permissions;
+    return $hash;
 }
 
 =head1 AUTHOR

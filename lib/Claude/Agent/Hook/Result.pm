@@ -15,7 +15,7 @@ Claude::Agent::Hook::Result - Hook result factory for Claude Agent SDK
     use Claude::Agent::Hook::Result;
 
     # In a hook callback:
-    return Claude::Agent::Hook::Result->continue();
+    return Claude::Agent::Hook::Result->proceed();
 
     return Claude::Agent::Hook::Result->allow(
         updated_input => { command => 'safe command' },
@@ -32,15 +32,15 @@ Factory methods for creating hook results.
 
 =head1 METHODS
 
-=head2 continue
+=head2 proceed
 
-    my $result = Claude::Agent::Hook::Result->continue();
+    my $result = Claude::Agent::Hook::Result->proceed();
 
-Continue without modification.
+Continue (proceed) without modification.
 
 =cut
 
-sub continue {
+sub proceed {
     return { decision => 'continue' };
 }
 

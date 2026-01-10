@@ -111,11 +111,13 @@ Get a tool definition by name.
 sub get_tool {
     my ($self, $tool_name) = @_;
 
+    return unless defined $tool_name && length $tool_name;
+
     for my $tool (@{$self->tools}) {
         return $tool if $tool->name eq $tool_name;
     }
 
-    return undef;
+    return;
 }
 
 =head3 tool_names

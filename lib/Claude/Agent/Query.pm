@@ -4,6 +4,7 @@ use 5.020;
 use strict;
 use warnings;
 
+use Time::HiRes ();
 use Types::Common -types;
 use Marlin
     'prompt!',                                     # Required prompt (string or async generator)
@@ -27,7 +28,7 @@ use Marlin
                 # with streaming JSON and partial data
                 warn "JSON::Lines $action error: $error"
                     if $ENV{CLAUDE_AGENT_DEBUG} && $ENV{CLAUDE_AGENT_DEBUG} > 1;
-                return undef;
+                return;
             },
         )
     };
@@ -39,6 +40,7 @@ use Future::AsyncAwait;
 use JSON::Lines;
 use Try::Tiny;
 use File::Which qw(which);
+use File::Spec;
 
 use Claude::Agent::Options;
 use Claude::Agent::Message;
@@ -126,6 +128,7 @@ sub BUILD {
     }
 
     $self->_start_process();
+    return;
 }
 
 sub _find_claude_cli {
@@ -139,9 +142,16 @@ sub _find_claude_cli {
     my @paths = (
         '/usr/local/bin/claude',
         '/opt/homebrew/bin/claude',
-        "$ENV{HOME}/.local/bin/claude",
-        "$ENV{HOME}/.npm-global/bin/claude",
     );
+    # Add HOME-based paths only if HOME is a valid absolute path without traversal
+    if ($ENV{HOME} && $ENV{HOME} =~ m{^/}) {
+        my $home = File::Spec->canonpath($ENV{HOME});
+        # Reject if canonicalized path still contains traversal sequences
+        if ($home !~ m{/\.\./} && $home !~ m{/\.\.\z}) {
+            push @paths, File::Spec->catfile($home, '.local', 'bin', 'claude');
+            push @paths, File::Spec->catfile($home, '.npm-global', 'bin', 'claude');
+        }
+    }
 
     for my $path (@paths) {
         return $path if -x $path;
@@ -150,6 +160,7 @@ sub _find_claude_cli {
     Claude::Agent::Error::CLINotFound->throw(
         message => "Could not find 'claude' CLI in PATH or common locations"
     );
+    return;  # Never reached, but satisfies perlcritic
 }
 
 sub _build_command {
@@ -167,9 +178,9 @@ sub _build_command {
         push @cmd, '--model', $opts->model;
     }
 
-    # Add max turns if specified
+    # Add max turns if specified (ensure integer)
     if ($opts->has_max_turns && $opts->max_turns) {
-        push @cmd, '--max-turns', $opts->max_turns;
+        push @cmd, '--max-turns', int($opts->max_turns);
     }
 
     # Add permission mode
@@ -201,16 +212,22 @@ sub _build_command {
     if ($opts->has_system_prompt && $opts->system_prompt) {
         my $sp = $opts->system_prompt;
         if (ref $sp eq 'HASH' && $sp->{preset}) {
-            push @cmd, '--system-prompt', $sp->{preset};
+            # Sanitize control characters from preset name
+            my $sanitized = $sp->{preset};
+            $sanitized =~ s/[[:cntrl:]]/ /g;
+            push @cmd, '--system-prompt', $sanitized;
         }
         elsif (!ref $sp) {
-            push @cmd, '--system-prompt', $sp;
+            # Sanitize control characters from system prompt
+            my $sanitized = $sp;
+            $sanitized =~ s/[[:cntrl:]]/ /g;
+            push @cmd, '--system-prompt', $sanitized;
         }
     }
 
     # Add MCP servers config
     # SDK servers are converted to stdio servers pointing to our SDKRunner
-    if ($opts->has_mcp_servers && $opts->mcp_servers || keys %{$self->_sdk_servers}) {
+    if (($opts->has_mcp_servers && $opts->mcp_servers && keys %{$opts->mcp_servers}) || keys %{$self->_sdk_servers}) {
         my %servers;
 
         # Add non-SDK servers directly
@@ -268,7 +285,10 @@ sub _build_command {
     # For string prompts, use --print mode with -- separator
     # For async generators, use stream-json input format
     if (!ref($self->prompt)) {
-        push @cmd, '--print', '--', $self->prompt;
+        # Sanitize control characters from prompt to prevent injection
+        my $sanitized_prompt = $self->prompt;
+        $sanitized_prompt =~ s/[[:cntrl:]]/ /g;
+        push @cmd, '--print', '--', $sanitized_prompt;
     }
     else {
         # For streaming input (async generator), use stream-json input format
@@ -291,7 +311,7 @@ sub _start_process {
         stdout => {
             on_read => sub {
                 my ($stream, $buffref) = @_;
-                while ($$buffref =~ s/^(.+)\n//) {
+                while ($$buffref =~ s/^([^\n]+)\n//) {
                     my $line = $1;
                     $self->_handle_line($line);
                 }
@@ -302,7 +322,7 @@ sub _start_process {
             on_read => sub {
                 my ($stream, $buffref) = @_;
                 # Log stderr but don't treat as fatal
-                while ($$buffref =~ s/^(.+)\n//) {
+                while ($$buffref =~ s/^([^\n]+)\n//) {
                     warn "Claude CLI stderr: $1\n" if $ENV{CLAUDE_AGENT_DEBUG};
                 }
                 return 0;
@@ -311,8 +331,10 @@ sub _start_process {
         on_finish => sub {
             my ($proc, $exitcode) = @_;
             $self->_finished(1);
-            if ($exitcode != 0) {
-                $self->_error("Claude CLI exited with code $exitcode");
+            # Extract actual exit status (WEXITSTATUS equivalent)
+            my $exit_status = $exitcode >> 8;
+            if ($exit_status != 0) {
+                $self->_error("Claude CLI exited with code $exit_status");
             }
             # Resolve any pending async futures
             $self->_resolve_pending_futures_on_finish();
@@ -326,15 +348,17 @@ sub _start_process {
         },
     );
 
-    $self->_loop->add($process);
+    # Store references before adding to loop to avoid race conditions
     $self->_process($process);
     $self->_stdin($process->stdin);
+    $self->_loop->add($process);
 
     # For non-streaming (--print) mode, close stdin to signal we're done
     if (!ref($self->prompt)) {
         $self->_stdin->close_when_empty;
     }
     # For ref prompts (streaming input), caller will send messages via send_user_message
+    return;
 }
 
 sub _handle_line {
@@ -353,6 +377,21 @@ sub _handle_line {
             warn "DEBUG: Buffer content (first 200): " . substr($self->_jsonl->remaining, 0, 200) . "\n";
         }
     }
+
+    # Guard against buffer overflow from accumulated malformed data
+    if (!@decoded && $self->_jsonl->remaining && length($self->_jsonl->remaining) > 100_000) {
+        warn "JSON::Lines buffer overflow detected, reinitializing\n" if $ENV{CLAUDE_AGENT_DEBUG};
+        $self->_jsonl(JSON::Lines->new(
+            utf8     => 1,
+            error_cb => sub {
+                my ($action, $error, $data) = @_;
+                warn "JSON::Lines $action error: $error"
+                    if $ENV{CLAUDE_AGENT_DEBUG} && $ENV{CLAUDE_AGENT_DEBUG} > 1;
+                return;
+            },
+        ));
+    }
+
     return unless @decoded;
 
     for my $data (@decoded) {
@@ -386,6 +425,7 @@ sub _handle_line {
             push @{$self->_messages}, $msg;
         }
     }
+    return;
 }
 
 sub _resolve_pending_futures_on_finish {
@@ -399,6 +439,7 @@ sub _resolve_pending_futures_on_finish {
     for my $sdk_server (values %{$self->_sdk_servers}) {
         $sdk_server->stop();
     }
+    return;
 }
 
 =head2 next
@@ -409,6 +450,7 @@ Blocking call to get the next message. Returns undef when no more messages.
 
 =cut
 
+## no critic (ProhibitBuiltinHomonyms)
 sub next {
     my ($self) = @_;
 
@@ -416,8 +458,20 @@ sub next {
     return shift @{$self->_messages} if @{$self->_messages};
 
     # Wait for more messages or process to finish
-    while (!@{$self->_messages} && !$self->_finished) {
-        $self->_loop->loop_once(0.01);
+    # Configurable timeout with 10 minute default
+    my $timeout = $self->options->query_timeout // 600;
+    my $start_time = Time::HiRes::time();
+    while (!@{$self->_messages} && !$self->_finished
+           && (Time::HiRes::time() - $start_time) < $timeout) {
+        $self->_loop->loop_once(0.1);  # Longer interval to reduce CPU busy-waiting
+    }
+
+    # Check if we timed out waiting for messages
+    if ((Time::HiRes::time() - $start_time) >= $timeout
+        && !@{$self->_messages} && !$self->_finished) {
+        $self->_finished(1);
+        $self->_error("Query timed out after $timeout seconds");
+        return;  # Return immediately on timeout
     }
 
     return shift @{$self->_messages};
@@ -501,10 +555,12 @@ Send interrupt signal to abort current operation.
 sub interrupt {
     my ($self) = @_;
 
-    return unless $self->_stdin;
+    return unless $self->_stdin && !$self->_finished;
 
     my $msg = $self->_jsonl->encode([{ type => 'interrupt' }]);
+    return unless defined $msg && length $msg;
     $self->_stdin->write($msg);
+    return;
 }
 
 =head2 send_user_message
@@ -518,7 +574,7 @@ Send a follow-up user message during streaming.
 sub send_user_message {
     my ($self, $content) = @_;
 
-    return unless $self->_stdin;
+    return unless $self->_stdin && !$self->_finished;
 
     my $msg = $self->_jsonl->encode([{
         type    => 'user',
@@ -528,6 +584,7 @@ sub send_user_message {
         },
     }]);
     $self->_stdin->write($msg);
+    return;
 }
 
 =head2 set_permission_mode
@@ -541,13 +598,14 @@ Change permission mode during streaming.
 sub set_permission_mode {
     my ($self, $mode) = @_;
 
-    return unless $self->_stdin;
+    return unless $self->_stdin && !$self->_finished;
 
     my $msg = $self->_jsonl->encode([{
         type            => 'set_permission_mode',
         permission_mode => $mode,
     }]);
     $self->_stdin->write($msg);
+    return;
 }
 
 =head2 respond_to_permission
@@ -564,7 +622,7 @@ Respond to a permission request.
 sub respond_to_permission {
     my ($self, $tool_use_id, $response) = @_;
 
-    return unless $self->_stdin;
+    return unless $self->_stdin && !$self->_finished;
 
     my $msg = $self->_jsonl->encode([{
         type        => 'permission_response',
@@ -572,6 +630,7 @@ sub respond_to_permission {
         response    => $response,
     }]);
     $self->_stdin->write($msg);
+    return;
 }
 
 =head2 rewind_files
@@ -585,10 +644,11 @@ Revert file changes to the checkpoint state.
 sub rewind_files {
     my ($self) = @_;
 
-    return unless $self->_stdin;
+    return unless $self->_stdin && !$self->_finished;
 
     my $msg = $self->_jsonl->encode([{ type => 'rewind_files' }]);
     $self->_stdin->write($msg);
+    return;
 }
 
 1;

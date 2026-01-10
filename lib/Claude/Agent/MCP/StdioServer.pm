@@ -19,11 +19,16 @@ Claude::Agent::MCP::StdioServer - Stdio MCP server configuration
 
 Configuration for an external MCP server process.
 
+B<Security note:> The command and args are passed directly to the Claude CLI
+for execution. Ensure you only use trusted values - never construct a
+StdioServer from untrusted user input without validation, as this could
+enable command injection attacks.
+
 =head2 ATTRIBUTES
 
 =over 4
 
-=item * command - Command to run
+=item * command - Command to run (should be a trusted executable path)
 
 =item * args - ArrayRef of command arguments
 

@@ -7,10 +7,10 @@ use Test::More;
 use Claude::Agent::Permission;
 
 # Test permission mode constants
-is(Claude::Agent::Permission::MODE_DEFAULT, 'default', 'MODE_DEFAULT constant');
-is(Claude::Agent::Permission::MODE_ACCEPT_EDIT, 'acceptEdits', 'MODE_ACCEPT_EDIT constant');
-is(Claude::Agent::Permission::MODE_BYPASS, 'bypassPermissions', 'MODE_BYPASS constant');
-is(Claude::Agent::Permission::MODE_DONT_ASK, 'dontAsk', 'MODE_DONT_ASK constant');
+is($Claude::Agent::Permission::MODE_DEFAULT, 'default', 'MODE_DEFAULT constant');
+is($Claude::Agent::Permission::MODE_ACCEPT_EDIT, 'acceptEdits', 'MODE_ACCEPT_EDIT constant');
+is($Claude::Agent::Permission::MODE_BYPASS, 'bypassPermissions', 'MODE_BYPASS constant');
+is($Claude::Agent::Permission::MODE_DONT_ASK, 'dontAsk', 'MODE_DONT_ASK constant');
 
 # Test Permission->allow()
 my $allow_result = Claude::Agent::Permission->allow(
