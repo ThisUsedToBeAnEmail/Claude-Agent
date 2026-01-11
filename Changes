@@ -1,5 +1,23 @@
 Revision history for Claude-Agent
 
+0.11    2026-01-11
+        [Session Support]
+        - Added session() export for multi-turn conversations
+        - Client::send() now properly resumes sessions (creates new Query with --resume)
+        - Fixed multi-turn async sessions (CLI exits after each turn, resume required)
+        - Added loop parameter documentation to session()
+        - New examples/14-session.pl demonstrating async multi-turn sessions
+        - New t/14-session.t test file
+
+        [CLI Utilities]
+        - New Claude::Agent::CLI module for interactive terminal UI
+        - Spinners: with_spinner, start_spinner, stop_spinner (IO::Async support)
+        - Prompts: prompt, ask_yn, menu, select_option, choose_from, choose_multiple
+        - Display: header, divider, status (colored output)
+        - Terminal control: clear_line, move_up
+        - Uses Term::Choose for keyboard-navigable menus
+        - Uses Term::ProgressSpinner for async-compatible spinners
+
 0.10    2026-01-11
         [Socket Lifecycle]
         - Added cleanup() method to Query for explicit socket cleanup
