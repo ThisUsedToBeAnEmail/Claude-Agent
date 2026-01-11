@@ -1,5 +1,23 @@
 Revision history for Claude-Agent
 
+0.08    2026-01-11
+        [Async Support]
+        - Async tool handlers: return Futures for non-blocking I/O
+        - Async hooks: callbacks can return Futures for async validation
+        - IO::Async::Loop passed to handlers/hooks for event-driven operations
+        - Backward compatible: sync handlers/hooks still work unchanged
+
+        [Debug Logging]
+        - Comprehensive operational logging (set CLAUDE_AGENT_DEBUG=1)
+        - Message lifecycle: receive, queue, deliver, process
+        - Socket lifecycle: connect, accept, close
+        - Tool execution: start, complete, results
+        - Hook execution: matchers, decisions, blocked tools
+
+        [Examples]
+        - examples/12-async-tool.pl: async tool patterns
+        - examples/13-async-hook.pl: async hook patterns
+
 0.07    2026-01-11
         - Added configurable logging system via Log::Any
         - New Claude::Agent::Logger module for default adapter setup

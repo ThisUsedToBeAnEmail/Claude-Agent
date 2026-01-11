@@ -10,6 +10,8 @@ examples/08-structured-output.pl
 examples/09-error-handling.pl
 examples/10-mcp-servers.pl
 examples/11-dry-run.pl
+examples/12-async-tool.pl
+examples/13-async-hook.pl
 ignore.txt
 lib/Claude/Agent.pm
 lib/Claude/Agent/Client.pm

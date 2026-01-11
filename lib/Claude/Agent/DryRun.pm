@@ -46,12 +46,49 @@ This module provides dry-run functionality for the Claude Agent SDK.
 In dry-run mode, file-modifying tools are intercepted and their effects
 are previewed without executing them.
 
-B<IMPORTANT SECURITY NOTE:> Dry-run mode provides B<preview functionality only>,
-B<NOT security guarantees>. The Bash command detection uses regex-based heuristics
-that can be bypassed through shell obfuscation techniques (command substitution,
-variable expansion, hex/octal encoding, aliases, etc.). For security-critical
-applications, use explicit tool whitelisting, containerization, or sandboxed
-environments instead of relying on dry-run mode.
+B<============================================================================>
+
+B<SECURITY WARNING: DRY-RUN MODE IS FOR PREVIEW ONLY - NOT A SECURITY BOUNDARY>
+
+B<============================================================================>
+
+Dry-run mode provides B<preview functionality only>, B<NOT security guarantees>.
+Do NOT rely on dry-run mode to prevent malicious or unintended command execution.
+
+By default, C<CLAUDE_AGENT_DRY_RUN_STRICT=1> is enabled, which uses a whitelist
+approach for Bash commands. If you disable strict mode (C<CLAUDE_AGENT_DRY_RUN_STRICT=0>),
+the Bash command detection falls back to regex-based heuristics that can be
+B<easily bypassed> through shell obfuscation techniques including:
+
+=over 4
+
+=item * Command substitution: C<$(echo rm) -rf>
+
+=item * Variable expansion: C<$cmd> where C<cmd=rm>
+
+=item * Hex/octal encoding in certain shells
+
+=item * Aliases that expand to destructive commands
+
+=item * Custom scripts or less common destructive tools
+
+=back
+
+B<For security-critical applications, use:>
+
+=over 4
+
+=item * Explicit tool whitelisting via C<allowed_tools>
+
+=item * Containerization (Docker, etc.)
+
+=item * Sandboxed/isolated environments
+
+=item * Custom C<PreToolUse> hooks with strict validation
+
+=back
+
+Do NOT rely on dry-run mode as a security mechanism.
 
 =head1 WRITE TOOLS
 
@@ -191,6 +228,29 @@ sub is_write_tool {
     if ($tool_name eq 'Bash') {
         my $command = $tool_input->{command} // '';
 
+        # SECURITY: Strict mode is the DEFAULT - requires explicit opt-out
+        # Set CLAUDE_AGENT_DRY_RUN_STRICT=0 to enable heuristic mode (NOT RECOMMENDED)
+        # Heuristic detection is bypassable via shell obfuscation techniques
+        # Only disable strict mode if you understand the security implications
+        if (!defined $ENV{CLAUDE_AGENT_DRY_RUN_STRICT} || $ENV{CLAUDE_AGENT_DRY_RUN_STRICT}) {
+            # In strict mode, only allow explicitly whitelisted read-only commands
+            my $safe_commands_env = $ENV{CLAUDE_AGENT_DRY_RUN_SAFE_COMMANDS}
+                // 'ls,cat,head,tail,grep,find,which,pwd,whoami,date,echo,wc,file,stat,type,uname,env,printenv';
+            my %safe_commands = map { $_ => 1 } split /,/, $safe_commands_env;
+
+            # Extract first command word (before any args, pipes, or redirects)
+            my ($first_cmd) = $command =~ /^\s*(\S+)/;
+            $first_cmd //= '';
+            # Strip path prefix if present (e.g., /bin/ls -> ls)
+            $first_cmd =~ s{^.*/}{};
+
+            # Block if command is not in safe list
+            return 1 unless $safe_commands{$first_cmd};
+            # Even safe commands are blocked if they use redirects or pipes
+            return 1 if $command =~ /[>|]/;
+            return 0;  # Safe command without redirects - allow
+        }
+
         # Commands that are definitely writes
         # Note: This detection is not exhaustive. Complex shell constructs, xargs with
         # write commands, or custom scripts may bypass detection. For maximum safety,
@@ -207,12 +267,27 @@ sub is_write_tool {
         #   - Custom scripts that perform write operations
         #
         # For security-critical applications, consider:
-        #   1. Whitelist approach (allow only known-safe commands):
-        #      my @safe_commands = qw(ls cat head tail grep find which pwd whoami date);
-        #      return 1 unless any { $command =~ /^\s*$_\b/ } @safe_commands;
+        #   1. Set CLAUDE_AGENT_DRY_RUN_STRICT=1 to block all non-whitelisted commands
         #   2. Running in a sandboxed environment (containers, VMs)
         #   3. Using custom PreToolUse hooks with stricter validation
-        return 1 if $command =~ /\b(rm|rmdir|mv|cp|mkdir|touch|chmod|chown|dd|truncate|install|ln|patch|rsync|wget|curl\s+.*-[oO]|shred)\b/;
+        #
+        # WARNING: Always print security notice to STDERR for Bash commands
+        # This ensures users are aware of limitations even if callbacks suppress output
+        if (!$ENV{CLAUDE_AGENT_DRY_RUN_QUIET}) {
+            state $dry_run_warned = 0;
+            warn "[DRY-RUN WARNING] Bash command detection is bypassable. "
+                . "Set CLAUDE_AGENT_DRY_RUN_STRICT=1 for stricter protection.\n"
+                unless $dry_run_warned++;
+        }
+        # More precise command detection: check if dangerous command is at start or after pipe/semicolon/&&
+        # This avoids false positives like 'grep rm file.txt' or 'echo rm > log.txt'
+        my @dangerous_cmds = qw(rm rmdir mv cp mkdir touch chmod chown dd truncate install ln patch rsync shred);
+        for my $cmd (@dangerous_cmds) {
+            return 1 if $command =~ /^\s*$cmd\b/ || $command =~ /[;|&]\s*$cmd\b/;
+        }
+        # Handle wget and curl with output flags separately (more complex patterns)
+        return 1 if $command =~ /^\s*wget\b/ || $command =~ /[;|&]\s*wget\b/;
+        return 1 if $command =~ /^\s*curl\s+.*-[oO]/ || $command =~ /[;|&]\s*curl\s+.*-[oO]/;
         return 1 if $command =~ /<<[<]?/;  # Heredoc redirects
         return 1 if $command =~ /\b(perl|python|ruby|sh|bash)\s+(-[ec]|-.*[ec])/i;  # Inline scripts that could write
         return 1 if $command =~ /\beval\b/;  # eval command
@@ -231,6 +306,21 @@ sub is_write_tool {
 
         # If disabling sandbox, likely a write
         return 1 if $tool_input->{dangerouslyDisableSandbox};
+
+        # In non-strict mode, warn if command is not in the safe list
+        # This helps users understand what would be blocked in strict mode
+        if (!$ENV{CLAUDE_AGENT_DRY_RUN_QUIET}) {
+            my $safe_commands_env = $ENV{CLAUDE_AGENT_DRY_RUN_SAFE_COMMANDS}
+                // 'ls,cat,head,tail,grep,find,which,pwd,whoami,date,echo,wc,file,stat,type,uname,env,printenv';
+            my %safe_commands = map { $_ => 1 } split /,/, $safe_commands_env;
+            my ($first_cmd) = $command =~ /^\s*(\S+)/;
+            $first_cmd //= '';
+            $first_cmd =~ s{^.*/}{};
+            if (!$safe_commands{$first_cmd}) {
+                warn "[DRY-RUN NOTICE] Command '$first_cmd' is not in safe list but allowed by heuristics. "
+                    . "In strict mode (default), this would be blocked.\n";
+            }
+        }
     }
 
     # MCP tools - check if marked as write operation via configuration
