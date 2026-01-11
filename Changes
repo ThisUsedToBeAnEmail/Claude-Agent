@@ -1,5 +1,8 @@
 Revision history for Claude-Agent
 
+0.13    2026-01-11
+	- fix progress spinner
+
 0.12    2026-01-11
 	- fix utf8 print bug
 

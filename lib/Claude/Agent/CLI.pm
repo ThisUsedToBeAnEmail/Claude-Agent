@@ -140,7 +140,7 @@ sub with_spinner {
 
 =head3 start_spinner
 
-    my $spinner = start_spinner($message, $loop);
+    my $spinner = start_spinner($message, $loop, %opts);
 
 Start an async spinner for long-running operations. Returns the spinner object.
 Call stop_spinner($spinner) when the operation completes.
@@ -148,10 +148,33 @@ Call stop_spinner($spinner) when the operation completes.
 When an IO::Async loop is provided, the spinner animates automatically.
 Without a loop, the spinner displays but doesn't animate (useful for quick operations).
 
+Options:
+
+    spinner        - Spinner style (default: 'dots')
+                     Available: dots, bar, around, pipe, moon, circle,
+                     color_circle, color_circles, color_square, color_squares,
+                     earth, circle_half, clock, pong, material
+    spinner_color  - Color for spinner (default: 'cyan')
+                     Available: black, red, green, yellow, blue, magenta, cyan, white
+                     Also: bright_* variants, and "color on_background" combinations
+    message        - Custom message format (default: "{spinner} $message")
+                     Placeholders: {spinner}, {elapsed}, {percent}, etc.
+    interval       - Animation interval in seconds (default: 0.1)
+    terminal_line  - Skip STDIN cursor query by providing line number
+
     use IO::Async::Loop;
     my $loop = IO::Async::Loop->new;
 
+    # Simple usage
     my $spinner = start_spinner("Processing...", $loop);
+
+    # Customized spinner
+    my $spinner = start_spinner("Loading...", $loop,
+        spinner       => 'moon',
+        spinner_color => 'yellow',
+        interval      => 0.2,
+    );
+
     my $result = await $async_operation;
     stop_spinner($spinner, "Processing complete");
 
@@ -160,17 +183,28 @@ Without a loop, the spinner displays but doesn't animate (useful for quick opera
 my $_active_spinner;
 
 sub start_spinner {
-    my ($message, $loop) = @_;
+    my ($message, $loop, %opts) = @_;
 
-    $_active_spinner = Term::ProgressSpinner->new(
-        spinner       => 'dots',
-        spinner_color => 'cyan',
-        message       => "{spinner} $message",
+    # Extract our options vs Term::ProgressSpinner options
+    my $interval = delete $opts{interval} // 0.1;
+
+    # Build spinner options with defaults
+    my %spinner_opts = (
+        spinner       => $opts{spinner}       // 'dots',
+        spinner_color => $opts{spinner_color} // 'cyan',
+        message       => $opts{message}       // "{spinner} $message",
     );
+
+    # Pass through any additional Term::ProgressSpinner options
+    for my $key (qw(terminal_line terminal_height output)) {
+        $spinner_opts{$key} = $opts{$key} if defined $opts{$key};
+    }
+
+    $_active_spinner = Term::ProgressSpinner->new(%spinner_opts);
 
     if ($loop) {
         # Async mode - spinner animates via IO::Async timer
-        $_active_spinner->start_async($loop, interval => 0.1);
+        $_active_spinner->start_async($loop, interval => $interval);
     } else {
         # Non-async mode - start and draw once
         $_active_spinner->start(1);
