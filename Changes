@@ -1,5 +1,12 @@
 Revision history for Claude-Agent
 
+0.09    2026-01-11
+        [Socket Lifecycle]
+        - Added cleanup() method to Query for explicit socket cleanup
+        - Fixes socket accumulation in iteration loops (e.g., refactor_until_clean)
+        - SDK server sockets now cleaned up after each query iteration
+        - _resolve_pending_futures_on_finish now delegates to cleanup()
+
 0.08    2026-01-11
         [Async Support]
         - Async tool handlers: return Futures for non-blocking I/O

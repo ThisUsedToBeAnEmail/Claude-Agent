@@ -88,6 +88,10 @@ B<For security-critical applications, use:>
 
 =back
 
+B<IMPORTANT:> For any production use, ensure C<CLAUDE_AGENT_DRY_RUN_STRICT=1> (the default)
+is always enabled. The heuristic fallback mode (C<CLAUDE_AGENT_DRY_RUN_STRICT=0>) is deprecated
+and may be removed in a future version.
+
 Do NOT rely on dry-run mode as a security mechanism.
 
 =head1 WRITE TOOLS
@@ -228,20 +232,37 @@ sub is_write_tool {
     if ($tool_name eq 'Bash') {
         my $command = $tool_input->{command} // '';
 
-        # SECURITY: Strict mode is the DEFAULT - requires explicit opt-out
-        # Set CLAUDE_AGENT_DRY_RUN_STRICT=0 to enable heuristic mode (NOT RECOMMENDED)
-        # Heuristic detection is bypassable via shell obfuscation techniques
-        # Only disable strict mode if you understand the security implications
+        # SECURITY: Strict mode is the DEFAULT and STRONGLY RECOMMENDED
+        # Set CLAUDE_AGENT_DRY_RUN_STRICT=0 to enable heuristic mode (DEPRECATED - NOT RECOMMENDED)
+        # WARNING: Heuristic detection provides NO security guarantees and is EASILY BYPASSED
+        # via shell obfuscation (command substitution, variable expansion, encoding, etc.)
+        # The heuristic fallback exists only for legacy compatibility and may be removed in future versions.
+        # For any security-sensitive use case, keep strict mode enabled (the default).
         if (!defined $ENV{CLAUDE_AGENT_DRY_RUN_STRICT} || $ENV{CLAUDE_AGENT_DRY_RUN_STRICT}) {
             # In strict mode, only allow explicitly whitelisted read-only commands
             my $safe_commands_env = $ENV{CLAUDE_AGENT_DRY_RUN_SAFE_COMMANDS}
                 // 'ls,cat,head,tail,grep,find,which,pwd,whoami,date,echo,wc,file,stat,type,uname,env,printenv';
-            my %safe_commands = map { $_ => 1 } split /,/, $safe_commands_env;
+            # Validate each command name to prevent injection via malicious env values
+            # Only allow alphanumeric characters, hyphens, and underscores
+            my @raw_commands = split /,/, $safe_commands_env;
+            my @valid_commands = grep { /^[a-zA-Z0-9_-]+$/ } @raw_commands;
+            # Log filtered entries to help users debug configuration issues
+            if (@valid_commands < @raw_commands) {
+                my %valid_set = map { $_ => 1 } @valid_commands;
+                my @filtered = grep { !$valid_set{$_} } @raw_commands;
+                warn sprintf("[DRY-RUN CONFIG] Filtered %d invalid entries from CLAUDE_AGENT_DRY_RUN_SAFE_COMMANDS: %s\n",
+                    scalar(@filtered), join(', ', map { "'$_'" } @filtered));
+            }
+            my %safe_commands = map { $_ => 1 } @valid_commands;
 
             # Extract first command word (before any args, pipes, or redirects)
             my ($first_cmd) = $command =~ /^\s*(\S+)/;
             $first_cmd //= '';
-            # Strip path prefix if present (e.g., /bin/ls -> ls)
+            # Keep full path for safe directory validation
+            if ($first_cmd =~ m{^/}) {
+                # Only strip if it's in a known safe directory
+                return 1 unless $first_cmd =~ m{^/(usr/)?s?bin/};
+            }
             $first_cmd =~ s{^.*/}{};
 
             # Block if command is not in safe list
@@ -249,6 +270,15 @@ sub is_write_tool {
             # Even safe commands are blocked if they use redirects or pipes
             return 1 if $command =~ /[>|]/;
             return 0;  # Safe command without redirects - allow
+        }
+
+        # DEPRECATED: Heuristic fallback mode - will be removed in a future version
+        # Emit deprecation warning when heuristic mode is used
+        state $heuristic_warned = 0;
+        if (!$heuristic_warned++) {
+            warn "[DEPRECATION WARNING] Dry-run heuristic mode (CLAUDE_AGENT_DRY_RUN_STRICT=0) is "
+                . "deprecated and provides NO security guarantees. This fallback may be removed in "
+                . "future versions. Use strict mode (default) for any security-sensitive applications.\n";
         }
 
         # Commands that are definitely writes

@@ -86,7 +86,7 @@ Returns a hashref suitable for use as a stdio MCP server config.
 
 B<Security Note:> The PERL5LIB environment variable is automatically
 filtered from @INC paths to include only known safe Perl library directories.
-However, symlinks within permitted directory prefixes are allowed by default.
+Symlinks within permitted directory prefixes are rejected by default for security.
 
 B<============================================================================>
 
@@ -94,23 +94,23 @@ B<SECURITY WARNING FOR PRODUCTION/MULTI-TENANT ENVIRONMENTS>
 
 B<============================================================================>
 
-In high-security or multi-tenant environments, symlinks within allowed
-directories (e.g., /Users/attacker/perl5/) could be exploited to inject
-malicious Perl libraries.
+Symlinks within allowed directories (e.g., /Users/attacker/perl5/) could
+be exploited to inject malicious Perl libraries. For this reason, symlinks
+are B<rejected by default>.
 
-B<REQUIRED for production/multi-tenant:> Set one of the following:
+B<Symlink handling options:>
 
-    # Option 1: Enable strict symlink checking (RECOMMENDED):
-    $ENV{CLAUDE_AGENT_PERL5LIB_STRICT} = 1;
+    # Symlinks are REJECTED by default (secure)
 
-    # Option 2: Set PERL5LIB explicitly to trusted paths only:
+    # To allow symlinks (NOT recommended for production):
+    $ENV{CLAUDE_AGENT_PERL5LIB_ALLOW_SYMLINKS} = 1;
+
+    # Alternative: Set PERL5LIB explicitly to trusted paths only:
     $ENV{PERL5LIB} = '/path/to/trusted/lib:/path/to/other/lib';
 
-Setting C<CLAUDE_AGENT_PERL5LIB_STRICT=1> causes the module to reject any
-library paths that are symlinks, preventing potential library injection
-attacks. This is the recommended approach for any environment where
-untrusted users may have write access to directories within the allowed
-path prefixes.
+The default behavior rejects any library paths that are symlinks, preventing
+potential library injection attacks. Only set C<CLAUDE_AGENT_PERL5LIB_ALLOW_SYMLINKS=1>
+if you have verified that all symlinks in your PERL5LIB paths are trusted.
 
 =cut
 
@@ -176,16 +176,22 @@ sub to_stdio_config {
                     $real = File::Spec->canonpath($real) if $real;
                     # Double-check the resolved path exists
                     defined $real && $real =~ m{^/} && -d $real
-                        # In strict mode, reject symlinks to prevent injection attacks
+                        # Reject symlinks by default to prevent injection attacks in multi-tenant environments
+                        # Set CLAUDE_AGENT_PERL5LIB_ALLOW_SYMLINKS=1 to allow symlinks (not recommended)
                         && do {
-                            if (-l $path && !$ENV{CLAUDE_AGENT_PERL5LIB_STRICT}) {
-                                # Log warning when symlinks are detected (security risk in multi-tenant)
-                                warn "[SECURITY] Symlink detected in PERL5LIB path: $path -> $real. "
-                                    . "Set CLAUDE_AGENT_PERL5LIB_STRICT=1 to reject symlinks.\n"
+                            if (-l $path && $ENV{CLAUDE_AGENT_PERL5LIB_ALLOW_SYMLINKS}) {
+                                # Symlinks explicitly allowed - log warning unless quieted
+                                # SECURITY WARNING: DO NOT set CLAUDE_AGENT_PERL5LIB_ALLOW_SYMLINKS=1 in production
+                                # or multi-tenant environments. Symlinks can enable library injection attacks.
+                                $log->warning("[SECURITY] Symlink allowed in PERL5LIB path (CLAUDE_AGENT_PERL5LIB_ALLOW_SYMLINKS=1). "
+                                    . "WARNING: This is insecure for production/multi-tenant environments!")
                                     unless $ENV{CLAUDE_AGENT_PERL5LIB_QUIET};
-                                1;  # Allow but warn
-                            } elsif (-l $path && $ENV{CLAUDE_AGENT_PERL5LIB_STRICT}) {
-                                0;  # Reject symlinks in strict mode
+                                1;  # Allow with warning
+                            } elsif (-l $path) {
+                                # Default: reject symlinks for security (prevents library injection)
+                                $log->warning("[SECURITY] Symlink rejected in PERL5LIB path (set CLAUDE_AGENT_PERL5LIB_ALLOW_SYMLINKS=1 to allow)")
+                                    unless $ENV{CLAUDE_AGENT_PERL5LIB_QUIET};
+                                0;  # Reject symlinks by default
                             } else {
                                 1;  # Not a symlink, allow
                             }
@@ -202,7 +208,8 @@ sub to_stdio_config {
                             || $real =~ m{^/opt/perl\d*/lib/}
                             || $real =~ m{^/home/[^/]+/perl5/}
                             || $real =~ m{^/Users/[^/]+/perl5/}
-                            || $real =~ m{^\Q$ENV{HOME}\E/perl5/}
+                            # Validate HOME is a legitimate user directory before using
+                            || ($ENV{HOME} && $ENV{HOME} =~ m{^/(home|Users)/[a-zA-Z0-9_-]+/?$} && $real =~ m{^\Q$ENV{HOME}\E/perl5/})
                             # Allow /lib within current working directory (for local development)
                             # This is more restrictive than generic /lib$ pattern
                             || (defined $ENV{PWD} && $real =~ m{^\Q$ENV{PWD}\E/(?:blib/)?lib$})

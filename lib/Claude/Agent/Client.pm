@@ -199,7 +199,7 @@ sub receive_until_result {
     my $max_allowed = 5_000;  # Reduced to prevent memory exhaustion (each message ~1-100KB)
     my $max_msg_env = $ENV{CLAUDE_AGENT_MAX_MESSAGES};
     $max_msg_env =~ s/^\s+|\s+$//g if defined $max_msg_env;  # trim whitespace
-    # Validate after trimming - must be positive integer (no leading zeros except for single 0)
+    # Validate after trimming - must be positive integer > 0 (rejects 0 and leading zeros)
     if (defined $max_msg_env && $max_msg_env =~ /^[1-9]\d*$/) {
         $max_iterations = $max_msg_env;
         if ($max_iterations > $max_allowed) {
@@ -216,13 +216,14 @@ sub receive_until_result {
         }
     }
     my $iterations = 0;
+    # Create JSON::Lines instance once outside the loop for better performance
+    require JSON::Lines;
+    my $jsonl = JSON::Lines->new;
     while (my $msg = $self->receive) {
         $iterations++;
         push @messages, $msg;
         # Estimate memory usage (rough heuristic based on message content)
         # Estimate size based on raw data structure - use JSON::Lines for encoding
-        require JSON::Lines;
-        state $jsonl = JSON::Lines->new;  # Reuse object to avoid allocation overhead
         my $json_str = eval { $jsonl->encode([$msg->message // {}]) } // '{}';
         $estimated_memory += length($json_str) + 500;  # Add overhead estimate
         last if $msg->isa('Claude::Agent::Message::Result');

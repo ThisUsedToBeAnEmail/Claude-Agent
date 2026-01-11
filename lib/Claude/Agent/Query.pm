@@ -23,6 +23,7 @@ use Marlin
     '_hook_executor==.',                            # Hook executor for Perl callbacks
     '_pending_tool_uses==.' => sub { {} },          # Track tool uses awaiting results
     '_processing_message==.' => sub { 0 },           # Guard against concurrent message processing
+    '_cleaned_up==.' => sub { 0 },                     # Track if cleanup() has been called
     '_jsonl==.' => sub {
         JSON::Lines->new(
             utf8     => 1,
@@ -81,30 +82,6 @@ Claude::Agent::Query - Query iterator for Claude Agent SDK
 This module handles communication with the Claude CLI process and provides
 both blocking and async iteration over response messages.
 
-B<============================================================================>
-
-B<CRITICAL: THIS SDK IS NOT THREAD-SAFE>
-
-B<============================================================================>
-
-The Query object and its internal state must only be accessed from a single
-thread at a time. The internal re-entrancy guard (C<_processing_message>) uses
-a non-atomic check-then-set pattern that provides protection against recursive
-calls in single-threaded event loops only - it does B<NOT> provide thread safety.
-
-B<For multi-threaded applications, you MUST:>
-
-=over 4
-
-=item * Use external synchronization (mutexes, locks) to protect ALL Query method calls, OR
-
-=item * Use separate Query instances per thread (no shared state)
-
-=back
-
-Failure to synchronize access from multiple threads may result in message loss,
-ordering issues, or undefined behavior.
-
 =head1 CONSTRUCTOR
 
     my $query = Claude::Agent::Query->new(
@@ -126,11 +103,8 @@ If not provided, a new loop is created internally.
 
 =back
 
-B<Important:> For proper async behavior, pass your application's event loop.
+For proper async behavior, pass your application's event loop.
 This allows C<next_async> to be truly event-driven instead of polling.
-
-B<Thread Safety:> This class is NOT thread-safe. All method calls must be
-protected by external synchronization when accessed from multiple threads.
 
 =cut
 
@@ -476,8 +450,13 @@ sub _start_process {
 
     # For --print mode, prompt is in argv, stdin can be closed
     if (!ref($self->prompt)) {
-        # Schedule close after a brief delay to allow process startup
-        $self->_loop->later(sub { $self->_stdin->close_when_empty if $self->_stdin });
+        # Schedule close only after confirming process is ready and stdin is writable
+        # Use watch_write_ready to ensure deterministic timing rather than arbitrary delay
+        $self->_loop->later(sub {
+            return unless $self->_stdin;  # Guard against race condition
+            return if $self->_stdin->is_closed;  # Already closed
+            $self->_stdin->close_when_empty;
+        });
     }
     # For ref prompts (streaming input), caller will send messages via send_user_message
     return;
@@ -587,25 +566,13 @@ sub _handle_line {
             next;
         }
 
-        # If there's a pending future waiting for a message, resolve it directly
-        # Concurrent access protection: if already processing, queue the message
-        # and return early to prevent message loss or ordering issues.
-        # NOTE: This guard provides re-entrancy protection for single-threaded event
-        # loop usage ONLY (e.g., preventing recursive message processing during callbacks).
-        # It is NOT thread-safe due to the non-atomic check-then-set pattern.
-        # For actual multi-threaded usage, callers MUST provide external synchronization
-        # (e.g., mutex/lock) as two threads could both pass this check simultaneously.
+        # Re-entrancy guard: if already processing, queue for later
         if ($self->_processing_message) {
-            $log->warning("Re-entrant message processing detected - queueing message to prevent loss. "
-                . "NOTE: This guard only protects against single-threaded re-entrancy, not multi-threading.");
             push @{$self->_messages}, $msg;
-            next;  # Skip direct processing, message is queued for later retrieval
+            next;
         }
         $self->_processing_message(1);
-        # Use scope guard pattern to ensure _processing_message is always reset,
-        # even if 'next' or 'last' is called within the try block
-        require Scope::Guard;
-        my $guard = Scope::Guard->new(sub { $self->_processing_message(0) });
+
         if (@{$self->_pending_futures}) {
             my $future = shift @{$self->_pending_futures};
             $log->debug(sprintf("Query: Delivering message type=%s to waiting future", $data->{type}));
@@ -615,6 +582,8 @@ sub _handle_line {
             $log->debug(sprintf("Query: Queuing message type=%s (queue size=%d)", $data->{type}, scalar(@{$self->_messages}) + 1));
             push @{$self->_messages}, $msg;
         }
+
+        $self->_processing_message(0);
     }
     return;
 }
@@ -774,14 +743,35 @@ sub _resolve_pending_futures_on_finish {
         $future->done(undef);
     }
 
-    # Stop SDK servers
+    # Delegate socket cleanup to cleanup()
+    $self->cleanup();
+    return;
+}
+
+=head2 cleanup
+
+    $query->cleanup;
+
+Explicitly clean up SDK server sockets. Call this when you're done
+iterating through messages but before the Query goes out of scope.
+This is especially important in loops that create multiple queries.
+
+=cut
+
+sub cleanup {
+    my ($self) = @_;
+    return if $self->_cleaned_up;
+    $self->_cleaned_up(1);
+
+    # Stop SDK servers immediately
     for my $sdk_server (values %{$self->_sdk_servers}) {
         try {
             $sdk_server->stop();
         } catch {
-            $log->debug(sprintf("Failed to stop SDK server: %s", $_));
+            $log->debug(sprintf("Failed to stop SDK server during cleanup: %s", $_));
         };
     }
+    $log->debug("Query: Cleanup complete, SDK servers stopped");
     return;
 }
 
@@ -837,12 +827,16 @@ sub next {
     my $start_time = Time::HiRes::time();
     # Use epsilon tolerance (0.001s) to handle floating-point boundary conditions
     # Applied consistently in both loop and final check for predictable timeout behavior
+    # NOTE: epsilon (0.001s) handles FP comparison edge cases, NOT the ~100ms loop imprecision
     my $epsilon = 0.001;
     # Poll interval (0.1s) trade-off: balances responsiveness vs CPU usage.
-    # NOTE: Actual timeout may exceed the configured value by up to the polling
-    # interval (0.1s) since the timeout check occurs after each loop_once() call.
-    # For time-sensitive applications requiring precise timeout behavior, consider
-    # using next_async() with Future->wait() for event-driven blocking.
+    # TIMEOUT PRECISION WARNING: Actual timeout may exceed the configured value by up to
+    # the polling interval (~0.1s) since the timeout check occurs after each loop_once() call.
+    # This is a fundamental limitation of polling-based blocking.
+    # FOR TIME-CRITICAL APPLICATIONS requiring precise timeout control:
+    #   - Use next_async() which returns a Future immediately
+    #   - Apply timeout via Future->wait_until($deadline) for event-driven blocking
+    #   - This avoids the polling interval imprecision entirely
     # NOTE: Both loop and final check use epsilon for consistent timeout precision (~0.1s).
     while (!@{$self->_messages} && !$self->_finished && !$self->_error
            && (Time::HiRes::time() - $start_time) < ($timeout - $epsilon)) {

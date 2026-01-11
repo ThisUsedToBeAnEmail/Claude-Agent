@@ -41,6 +41,7 @@ sub _make_state_class {
             socket_stream   => undef,
             request_id      => 0,
             pending_requests => {},
+            pending_responses => {},  # Initialize alongside other state variables
             jsonl           => undef,
             loop            => undef,
             response_buffer => '',
@@ -113,10 +114,31 @@ sub run {
         push @allowed_prefixes, "$ENV{HOME}/.tmp/";
     }
     # Allow TMPDIR if set (File::Temp respects this)
-    # SECURITY NOTE: TMPDIR is user-controllable. If an attacker can set TMPDIR
-    # before process start, they could influence allowed socket paths. In high-security
-    # environments, consider using only fixed prefixes or validating socket ownership.
-    if ($ENV{TMPDIR} && $ENV{TMPDIR} =~ m{^/}) {
+    # *** SECURITY WARNING ***
+    # TMPDIR is user-controllable and NOT validated for trust.
+    # KNOWN RISK: An attacker who can set TMPDIR before process startup
+    # could influence which socket paths are allowed, potentially enabling
+    # connections to attacker-controlled sockets.
+    #
+    # FOR HIGH-SECURITY DEPLOYMENTS: Set CLAUDE_AGENT_IGNORE_TMPDIR=1
+    #
+    # Additional mitigations:
+    #   1. Set CLAUDE_AGENT_IGNORE_TMPDIR=1 to ignore TMPDIR entirely (RECOMMENDED)
+    #   2. Validate socket ownership with stat() before connecting
+    #   3. Use only fixed prefixes by not setting TMPDIR
+    #   4. Run in a restricted environment where TMPDIR cannot be manipulated
+    #   5. Set TMPDIR to a trusted directory (e.g., /tmp) before process startup
+    # Only allow TMPDIR when explicitly enabled via CLAUDE_AGENT_ALLOW_TMPDIR=1
+    # This is opt-in for stricter security - TMPDIR could be attacker-controlled
+    # SECURITY WARNING: NEVER set CLAUDE_AGENT_ALLOW_TMPDIR=1 in untrusted environments
+    # or when an attacker could control environment variables before process startup.
+    # An attacker could set both CLAUDE_AGENT_ALLOW_TMPDIR=1 and a malicious TMPDIR
+    # to redirect socket connections to attacker-controlled locations.
+    if ($ENV{TMPDIR} && $ENV{TMPDIR} =~ m{^/} && $ENV{CLAUDE_AGENT_ALLOW_TMPDIR}) {
+        # SECURITY: Log warning when TMPDIR override is used
+        warn "[SECURITY WARNING] TMPDIR-based socket path allowed via CLAUDE_AGENT_ALLOW_TMPDIR. "
+            . "This is insecure if an attacker can control environment variables.\n"
+            unless $ENV{CLAUDE_AGENT_QUIET_SECURITY_WARNINGS};
         push @allowed_prefixes, $ENV{TMPDIR};
         push @allowed_prefixes, "$ENV{TMPDIR}/" unless $ENV{TMPDIR} =~ m{/$};
     }
@@ -157,6 +179,19 @@ sub run {
 
     # Build tool lookup
     my %tool_by_name = map { $_->{name} => $_ } @$tools;
+
+    # Validate socket ownership before connecting (defense-in-depth)
+    # This helps detect if an attacker has replaced the socket with one they control
+    {
+        my @stat_info = stat($socket_path);
+        if (@stat_info) {
+            my $socket_uid = $stat_info[4];
+            if ($socket_uid != $<) {
+                die "Security error: socket '$socket_path' is owned by uid $socket_uid, expected uid $< (current user)\n";
+            }
+        }
+        # If stat fails, the socket may not exist yet - let the connect() call handle it
+    }
 
     # Connect to parent socket
     $state->{socket} = IO::Socket::UNIX->new(
@@ -480,7 +515,14 @@ sub call_parent_handler {
     # Extract the response line from buffer, matching by request ID
     my $response_line;
     # First check if we have a pending response for this request ID (from previous calls)
-    $state->{pending_responses} //= {};
+    # NOTE: pending_responses is initialized in reset_state() which is called at start of run().
+    # Always verify initialization to catch bugs early - uninitialized state indicates
+    # reset_state() was not called properly, which is a programming error.
+    if (!defined $state->{pending_responses}) {
+        require Carp;
+        Carp::croak("BUG: pending_responses not initialized - reset_state() was not called properly. "
+            . "This is a programming error that must be fixed.");
+    }
     if (exists $state->{pending_responses}{$request_id}) {
         my $pending = delete $state->{pending_responses}{$request_id};
         $response_line = $pending->{line};
