@@ -19,6 +19,8 @@ use Marlin
     '_finished==.' => sub { 0 },                   # Process finished flag
     '_error==.',                                   # Error message if process failed
     '_sdk_servers==.' => sub { {} },               # SDK server wrappers (name => SDKServer)
+    '_hook_executor==.',                            # Hook executor for Perl callbacks
+    '_pending_tool_uses==.' => sub { {} },          # Track tool uses awaiting results
     '_jsonl==.' => sub {
         JSON::Lines->new(
             utf8     => 1,
@@ -46,6 +48,8 @@ use Claude::Agent::Options;
 use Claude::Agent::Message;
 use Claude::Agent::Error;
 use Claude::Agent::MCP::SDKServer;
+use Claude::Agent::Hook::Executor;
+use Claude::Agent::DryRun qw(create_dry_run_hooks);
 
 =head1 NAME
 
@@ -107,6 +111,45 @@ sub BUILD {
     # Use provided loop or create a new one
     # For proper async, callers should pass their own loop
     $self->_loop($self->loop // IO::Async::Loop->new);
+
+    # Merge hooks: user-provided hooks + dry-run hooks if enabled
+    my %all_hooks;
+
+    # Add user-provided hooks
+    if ($self->options->has_hooks && $self->options->hooks) {
+        for my $event (keys %{$self->options->hooks}) {
+            $all_hooks{$event} = [ @{$self->options->hooks->{$event}} ];
+        }
+    }
+
+    # Add dry-run hooks if enabled
+    if ($self->options->has_dry_run && $self->options->dry_run) {
+        my $on_dry_run = $self->options->has_on_dry_run ? $self->options->on_dry_run : undef;
+        my $dry_run_hooks = create_dry_run_hooks($on_dry_run);
+
+        for my $event (keys %$dry_run_hooks) {
+            $all_hooks{$event} //= [];
+            # Dry-run hooks should run first (before user hooks)
+            unshift @{$all_hooks{$event}}, @{$dry_run_hooks->{$event}};
+        }
+
+        warn "DEBUG: Dry-run mode enabled\n" if $ENV{CLAUDE_AGENT_DEBUG};
+        # Note: create_dry_run_hooks() emits its own prominent security warning
+        # unless CLAUDE_AGENT_DRY_RUN_NO_WARN is set
+    }
+
+    # Create hook executor if we have any hooks
+    if (%all_hooks) {
+        $self->_hook_executor(
+            Claude::Agent::Hook::Executor->new(
+                hooks => \%all_hooks,
+                ($self->options->has_cwd ? (cwd => $self->options->cwd) : ()),
+            )
+        );
+        warn "DEBUG: Hook executor initialized with hooks for: " .
+            join(', ', keys %all_hooks) . "\n"
+            if $ENV{CLAUDE_AGENT_DEBUG};
+    }
 
     # Create SDKServer wrappers for SDK MCP servers
     # These spawn socket listeners that the MCP runner connects to
@@ -291,9 +334,11 @@ sub _build_command {
         my $sanitized_prompt = $self->prompt;
         $sanitized_prompt =~ s/\x1b\[[0-9;]*[a-zA-Z]//g;  # Strip ANSI escape codes
         $sanitized_prompt =~ s/\x1b\][^\x07]*\x07//g;     # Strip OSC sequences (title changes, etc.)
-        $sanitized_prompt =~ s/\x1b[PX^_].*?\x1b\\//g;    # Strip DCS/SOS/PM/APC sequences
+        $sanitized_prompt =~ s/\x1b[PX^_].*?(?:\x1b\\|\x07)//gs;    # Strip DCS/SOS/PM/APC sequences (both terminators)
         # Remove dangerous control chars but preserve tab (\x09), newline (\x0a), carriage return (\x0d)
         $sanitized_prompt =~ s/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/ /g;
+        # Final safety check: remove any remaining escape sequences that may have been malformed
+        $sanitized_prompt =~ s/\x1b[^a-zA-Z]*[a-zA-Z]?//g;
         push @cmd, '--print', '--', $sanitized_prompt;
     }
     else {
@@ -391,14 +436,26 @@ sub _handle_line {
 
     # Guard against buffer overflow from accumulated malformed data
     # Configurable threshold via environment variable, default 100KB, max 10MB
+    # Note: Typical JSON messages from Claude CLI are 1-50KB; tool results may be larger.
+    # Set CLAUDE_AGENT_JSONL_BUFFER_MAX to at least 2x your largest expected message size.
     my $buffer_threshold = $ENV{CLAUDE_AGENT_JSONL_BUFFER_MAX} // 100_000;
-    my $min_threshold = 1000;  # Minimum 1KB to prevent excessive reinitializations
-    if (!defined $buffer_threshold || $buffer_threshold !~ /^\d+$/ || $buffer_threshold < $min_threshold) {
-        warn "Invalid CLAUDE_AGENT_JSONL_BUFFER_MAX value, using default 100000\n"
+    my $min_threshold = 10_000;  # Minimum 10KB to accommodate larger legitimate messages
+    my $max_threshold = 10_000_000;  # Hard cap at 10MB
+    if (!defined $buffer_threshold || $buffer_threshold !~ /^\d+$/) {
+        warn "[WARNING] CLAUDE_AGENT_JSONL_BUFFER_MAX='$ENV{CLAUDE_AGENT_JSONL_BUFFER_MAX}' is not a valid integer, using default 100000\n"
             if defined $ENV{CLAUDE_AGENT_JSONL_BUFFER_MAX};
         $buffer_threshold = 100_000;
     }
-    $buffer_threshold = 10_000_000 if $buffer_threshold > 10_000_000;  # Hard cap at 10MB
+    elsif ($buffer_threshold < $min_threshold) {
+        warn "[WARNING] CLAUDE_AGENT_JSONL_BUFFER_MAX=$buffer_threshold is below minimum ($min_threshold), using $min_threshold. "
+            . "Very small values may truncate legitimate large tool results.\n";
+        $buffer_threshold = $min_threshold;
+    }
+    elsif ($buffer_threshold > $max_threshold) {
+        warn "[WARNING] CLAUDE_AGENT_JSONL_BUFFER_MAX=$buffer_threshold exceeds maximum ($max_threshold), using $max_threshold\n"
+            if $ENV{CLAUDE_AGENT_DEBUG};
+        $buffer_threshold = $max_threshold;
+    }
 
     # Check buffer size regardless of decode success to prevent unbounded growth
     if ($self->_jsonl->remaining && length($self->_jsonl->remaining) > $buffer_threshold) {
@@ -436,19 +493,132 @@ sub _handle_line {
         if ($msg->isa('Claude::Agent::Message::System')
             && $msg->subtype eq 'init') {
             $self->_session_id($msg->get_session_id);
+            # Update hook executor with session_id
+            if ($self->_hook_executor) {
+                $self->_hook_executor->session_id($self->_session_id);
+            }
         }
 
+        # Execute Perl hooks for tool use messages
+        $msg = $self->_execute_hooks_for_message($msg);
+
+        # Skip if message was blocked by hooks
+        next unless defined $msg;
+
         # If there's a pending future waiting for a message, resolve it directly
+        # NOTE: This code assumes single-threaded, single-loop access.
+        # Concurrent calls to next()/next_async() from different contexts
+        # WILL cause message loss or duplication. No synchronization is provided.
         if (@{$self->_pending_futures}) {
             my $future = shift @{$self->_pending_futures};
             $future->done($msg);
         }
         else {
-            # Otherwise queue it for next() or next_async()
             push @{$self->_messages}, $msg;
         }
     }
     return;
+}
+
+# Execute hooks for messages containing tool use/result blocks
+sub _execute_hooks_for_message {
+    my ($self, $msg) = @_;
+
+    return $msg unless $self->_hook_executor;
+
+    # Handle assistant messages with tool_use blocks (PreToolUse)
+    if ($msg->isa('Claude::Agent::Message::Assistant')) {
+        my $tool_uses = $msg->tool_uses;
+        if ($tool_uses && @$tool_uses) {
+            for my $tool_use (@$tool_uses) {
+                my $tool_name = $tool_use->can('name') ? $tool_use->name : $tool_use->{name};
+                my $tool_input = $tool_use->can('input') ? $tool_use->input : $tool_use->{input};
+                my $tool_use_id = $tool_use->can('id') ? $tool_use->id : $tool_use->{id};
+
+                next unless $tool_name && $tool_use_id;
+
+                # Track this tool use for PostToolUse hooks
+                $self->_pending_tool_uses->{$tool_use_id} = {
+                    tool_name  => $tool_name,
+                    tool_input => $tool_input,
+                };
+
+                # Run PreToolUse hooks
+                if ($self->_hook_executor->has_hooks_for('PreToolUse')) {
+                    my $result = $self->_hook_executor->run_pre_tool_use(
+                        $tool_name, $tool_input, $tool_use_id
+                    );
+
+                    if ($result->{decision} eq 'deny') {
+                        warn "[HOOK] Blocked tool: $tool_name - " .
+                            ($result->{reason} // 'denied by hook') . "\n"
+                            if $ENV{CLAUDE_AGENT_DEBUG};
+
+                        # Send permission denial to CLI
+                        $self->respond_to_permission($tool_use_id, {
+                            behavior => 'deny',
+                            reason   => $result->{reason} // 'Denied by Perl hook',
+                        });
+
+                        # Remove from pending since we denied it
+                        delete $self->_pending_tool_uses->{$tool_use_id};
+                    }
+                    elsif ($result->{decision} eq 'allow' && $result->{updated_input}) {
+                        warn "[HOOK] Modified tool input for: $tool_name\n"
+                            if $ENV{CLAUDE_AGENT_DEBUG};
+
+                        # Send permission with modified input
+                        $self->respond_to_permission($tool_use_id, {
+                            behavior      => 'allow',
+                            updated_input => $result->{updated_input},
+                        });
+
+                        # Update pending with modified input
+                        $self->_pending_tool_uses->{$tool_use_id}{tool_input} =
+                            $result->{updated_input};
+                    }
+                    # 'continue' or 'allow' without modifications - let it proceed normally
+                }
+            }
+        }
+    }
+
+    # Handle system messages with tool results (PostToolUse / PostToolUseFailure)
+    if ($msg->isa('Claude::Agent::Message::System')) {
+        my $subtype = $msg->subtype // '';
+
+        # Check for tool result in system message
+        if ($subtype eq 'tool_result' || $subtype eq 'tool_output') {
+            my $tool_use_id = $msg->can('tool_use_id') ? $msg->tool_use_id : undef;
+
+            if ($tool_use_id && exists $self->_pending_tool_uses->{$tool_use_id}) {
+                my $pending = delete $self->_pending_tool_uses->{$tool_use_id};
+                my $tool_name = $pending->{tool_name};
+                my $tool_input = $pending->{tool_input};
+
+                # Determine if success or failure
+                my $is_error = $msg->can('is_error') ? $msg->is_error : 0;
+                my $tool_result = $msg->can('content') ? $msg->content : undef;
+
+                if ($is_error) {
+                    if ($self->_hook_executor->has_hooks_for('PostToolUseFailure')) {
+                        $self->_hook_executor->run_post_tool_use_failure(
+                            $tool_name, $tool_input, $tool_use_id, $tool_result
+                        );
+                    }
+                }
+                else {
+                    if ($self->_hook_executor->has_hooks_for('PostToolUse')) {
+                        $self->_hook_executor->run_post_tool_use(
+                            $tool_name, $tool_input, $tool_use_id, $tool_result
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    return $msg;
 }
 
 sub _resolve_pending_futures_on_finish {
@@ -475,6 +645,16 @@ sub _resolve_pending_futures_on_finish {
 
 Blocking call to get the next message. Returns undef when no more messages.
 
+B<Performance Note:> This method uses a polling loop with 0.1 second intervals,
+which may cause unnecessary CPU wake-ups and latency for long-running queries.
+For better efficiency in async applications, use C<next_async()> with
+C<< Future->wait() >> or integrate with your event loop directly.
+
+B<Timeout Note:> The actual timeout may exceed the configured C<query_timeout>
+value by up to the polling interval (0.1 seconds), as the timeout check occurs
+after each polling cycle completes. For applications requiring precise timeout
+behavior, consider using C<next_async()> with explicit timeout handling.
+
 =cut
 
 ## no critic (ProhibitBuiltinHomonyms)
@@ -497,9 +677,14 @@ sub next {
     my $start_time = Time::HiRes::time();
     # Use epsilon tolerance (0.001s) to handle floating-point boundary conditions
     my $epsilon = 0.001;
+    # Poll interval (0.1s) trade-off: balances responsiveness vs CPU usage.
+    # NOTE: Actual timeout may exceed the configured value by up to the polling
+    # interval (0.1s) since the timeout check occurs after each loop_once() call.
+    # For time-sensitive applications requiring precise timeout behavior, consider
+    # using next_async() with Future->wait() for event-driven blocking.
     while (!@{$self->_messages} && !$self->_finished && !$self->_error
            && (Time::HiRes::time() - $start_time) < ($timeout - $epsilon)) {
-        $self->_loop->loop_once(0.1);  # Longer interval to reduce CPU busy-waiting
+        $self->_loop->loop_once(0.1);
     }
 
     # Check if we timed out waiting for messages
@@ -623,11 +808,12 @@ sub send_user_message {
             content => $content,
         },
     }]);
-    my $result;
+    my $result = 0;  # Default to failure
     try {
         $result = $self->_stdin->write($msg);
     } catch {
         warn "send_user_message write error: $_" if $ENV{CLAUDE_AGENT_DEBUG};
+        $result = 0;
     };
     return $result;
 }
@@ -649,7 +835,11 @@ sub set_permission_mode {
         type            => 'set_permission_mode',
         permission_mode => $mode,
     }]);
-    $self->_stdin->write($msg);
+    try {
+        $self->_stdin->write($msg);
+    } catch {
+        warn "set_permission_mode write error: $_" if $ENV{CLAUDE_AGENT_DEBUG};
+    };
     return;
 }
 

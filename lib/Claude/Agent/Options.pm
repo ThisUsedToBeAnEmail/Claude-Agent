@@ -57,7 +57,13 @@ use Marlin
     'continue_conversation?' => Bool,
 
     # Query timeout in seconds (default 600 = 10 minutes)
-    'query_timeout?' => Int;
+    'query_timeout?' => Int,
+
+    # Dry-run mode - preview tool calls without executing writes
+    'dry_run?' => Bool,
+
+    # Dry-run callback for custom handling
+    'on_dry_run?' => CodeRef;
 
 =head1 NAME
 
@@ -188,6 +194,36 @@ interactive applications, or higher for complex long-running queries.
 
 The MCP tool handler timeout can be configured via the
 C<CLAUDE_AGENT_TOOL_TIMEOUT> environment variable (default 60 seconds).
+
+=head2 dry_run
+
+Boolean. If true, enables dry-run mode where file-modifying tools (Write, Edit,
+Bash with write operations) are intercepted and their effects are previewed
+without actually executing them. Read-only tools (Read, Glob, Grep) still execute
+normally.
+
+    my $options = Claude::Agent::Options->new(
+        dry_run => 1,
+        on_dry_run => sub {
+            my ($tool_name, $tool_input, $preview) = @_;
+            print "Would execute $tool_name:\n";
+            print "  $preview\n";
+        },
+    );
+
+=head2 on_dry_run
+
+Coderef callback invoked when a tool is blocked in dry-run mode. Receives:
+
+=over 4
+
+=item * tool_name - Name of the tool that would execute
+
+=item * tool_input - HashRef of input parameters
+
+=item * preview - Human-readable preview of what would happen
+
+=back
 
 =head1 METHODS
 

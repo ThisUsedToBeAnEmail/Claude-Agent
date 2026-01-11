@@ -9,6 +9,7 @@ examples/07-subagents.pl
 examples/08-structured-output.pl
 examples/09-error-handling.pl
 examples/10-mcp-servers.pl
+examples/11-dry-run.pl
 ignore.txt
 lib/Claude/Agent.pm
 lib/Claude/Agent/Client.pm
@@ -17,6 +18,7 @@ lib/Claude/Agent/Content/Text.pm
 lib/Claude/Agent/Content/Thinking.pm
 lib/Claude/Agent/Content/ToolResult.pm
 lib/Claude/Agent/Content/ToolUse.pm
+lib/Claude/Agent/DryRun.pm
 lib/Claude/Agent/Error.pm
 lib/Claude/Agent/Error/CLINotFound.pm
 lib/Claude/Agent/Error/HookError.pm
@@ -26,6 +28,7 @@ lib/Claude/Agent/Error/ProcessError.pm
 lib/Claude/Agent/Error/TimeoutError.pm
 lib/Claude/Agent/Hook.pm
 lib/Claude/Agent/Hook/Context.pm
+lib/Claude/Agent/Hook/Executor.pm
 lib/Claude/Agent/Hook/Matcher.pm
 lib/Claude/Agent/Hook/Result.pm
 lib/Claude/Agent/MCP.pm
@@ -54,8 +57,6 @@ lib/Claude/Agent/Subagent.pm
 Makefile.PL
 MANIFEST
 MANIFEST.SKIP
-META.json			Module JSON meta-data (added by MakeMaker)
-META.yml			Module YAML meta-data (added by MakeMaker)
 README
 t/00-load.t
 t/01-basic.t

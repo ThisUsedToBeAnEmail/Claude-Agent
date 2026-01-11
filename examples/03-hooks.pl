@@ -1,9 +1,9 @@
 #!/usr/bin/env perl
 #
-# Hooks Example
+# Perl Hooks Example
 #
-# This example demonstrates how to use hooks to intercept
-# and control tool usage during a conversation.
+# This example demonstrates how to use Perl hook callbacks
+# to intercept and control tool execution.
 #
 
 use 5.020;
@@ -13,82 +13,90 @@ use warnings;
 use lib 'lib';
 use Claude::Agent qw(query);
 use Claude::Agent::Options;
-use Claude::Agent::Hook;
 use Claude::Agent::Hook::Matcher;
 use Claude::Agent::Hook::Result;
 
-# Create a hook that logs all tool usage
-my $logging_hook = Claude::Agent::Hook::Matcher->new(
-    # No matcher = matches all tools
-    hooks => [sub {
-        my ($input, $tool_use_id, $context) = @_;
+# Define PreToolUse hooks that run BEFORE a tool executes
+my $pre_tool_hooks = [
+    # Hook for all tools - log every tool call
+    Claude::Agent::Hook::Matcher->new(
+        hooks => [sub {
+            my ($input, $tool_use_id, $context) = @_;
+            my $tool_name = $input->{tool_name};
+            say "[LOG] Tool called: $tool_name";
+            return Claude::Agent::Hook::Result->proceed();
+        }],
+    ),
 
-        my $tool_name = $input->{tool_name};
-        say "[LOG] Tool called: $tool_name";
+    # Hook for Glob tool - modify the pattern
+    Claude::Agent::Hook::Matcher->new(
+        matcher => 'Glob',
+        hooks   => [sub {
+            my ($input, $tool_use_id, $context) = @_;
+            my $pattern = $input->{tool_input}{pattern} // '';
+            say "[HOOK] Glob pattern requested: $pattern";
 
-        # Continue without modification
-        return Claude::Agent::Hook::Result->continue();
-    }],
-);
+            # Example: could modify the pattern here
+            # return Claude::Agent::Hook::Result->allow(
+            #     updated_input => { pattern => '*.pm' },
+            #     reason => 'Modified pattern',
+            # );
 
-# Create a hook that blocks dangerous Bash commands
-my $bash_guard = Claude::Agent::Hook::Matcher->new(
-    matcher => 'Bash',
-    hooks   => [sub {
-        my ($input, $tool_use_id, $context) = @_;
+            return Claude::Agent::Hook::Result->proceed();
+        }],
+    ),
 
-        my $command = $input->{tool_input}{command} // '';
+    # Hook for Read tool - block reading certain files
+    Claude::Agent::Hook::Matcher->new(
+        matcher => 'Read',
+        hooks   => [sub {
+            my ($input, $tool_use_id, $context) = @_;
+            my $file_path = $input->{tool_input}{file_path} // '';
 
-        # Block potentially dangerous commands
-        if ($command =~ /rm\s+-rf|sudo|chmod\s+777|>\s*\//) {
-            say "[BLOCKED] Dangerous command: $command";
-            return Claude::Agent::Hook::Result->deny(
-                reason => 'This command has been blocked for safety reasons.',
-            );
-        }
+            # Block reading .env files (security example)
+            if ($file_path =~ /\.env$/i) {
+                say "[HOOK] BLOCKED: Cannot read .env files!";
+                return Claude::Agent::Hook::Result->deny(
+                    reason => 'Reading .env files is not allowed',
+                );
+            }
 
-        # Allow safe commands
-        return Claude::Agent::Hook::Result->continue();
-    }],
-);
+            say "[HOOK] Allowing read: $file_path";
+            return Claude::Agent::Hook::Result->proceed();
+        }],
+    ),
+];
 
-# Create a hook that modifies file paths
-my $path_rewriter = Claude::Agent::Hook::Matcher->new(
-    matcher => 'Read',
-    hooks   => [sub {
-        my ($input, $tool_use_id, $context) = @_;
-
-        my $file_path = $input->{tool_input}{file_path} // '';
-
-        # Log the file being read
-        say "[READ] Accessing: $file_path";
-
-        # Could modify the path here if needed
-        # return Claude::Agent::Hook::Result->allow(
-        #     updated_input => { %{$input->{tool_input}}, file_path => $new_path },
-        # );
-
-        return Claude::Agent::Hook::Result->continue();
-    }],
-);
+# Define PostToolUse hooks that run AFTER a tool completes
+my $post_tool_hooks = [
+    Claude::Agent::Hook::Matcher->new(
+        hooks => [sub {
+            my ($input, $tool_use_id, $context) = @_;
+            my $tool_name = $input->{tool_name};
+            say "[LOG] Tool completed: $tool_name";
+            return Claude::Agent::Hook::Result->proceed();
+        }],
+    ),
+];
 
 # Configure options with hooks
 my $options = Claude::Agent::Options->new(
-    allowed_tools   => ['Read', 'Glob', 'Grep', 'Bash'],
+    allowed_tools   => ['Read', 'Glob', 'Grep'],  # Only read-only tools
     permission_mode => 'bypassPermissions',
     max_turns       => 5,
     hooks           => {
-        PreToolUse => [$logging_hook, $bash_guard, $path_rewriter],
+        PreToolUse  => $pre_tool_hooks,
+        PostToolUse => $post_tool_hooks,
     },
 );
 
-# Send a query
+# Send a query that will trigger our hooks
 my $iter = query(
-    prompt  => 'List the files in the current directory using ls command.',
+    prompt  => 'Use the Glob tool to list all .pm files in the lib directory.',
     options => $options,
 );
 
-say "Sending query with hooks enabled...";
+say "Sending query with Perl hooks...";
 say "-" x 50;
 
 while (my $msg = $iter->next) {

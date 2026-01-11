@@ -180,14 +180,26 @@ sub receive_until_result {
     my ($self) = @_;
 
     my @messages;
-    my $max_iterations = 10000;  # Prevent infinite loops on unexpected disconnection
+    # Default to 1000 messages - generous for typical use but prevents runaway loops.
+    # For very long-running operations, set CLAUDE_AGENT_MAX_MESSAGES higher (max 100000).
+    # Typical queries produce 10-100 messages; 1000 allows for complex multi-tool operations.
+    my $max_iterations = 1000;
+    my $max_allowed = 100_000;  # Hard cap to prevent unbounded resource consumption
+    if (defined $ENV{CLAUDE_AGENT_MAX_MESSAGES} && $ENV{CLAUDE_AGENT_MAX_MESSAGES} =~ /^\d+$/ && $ENV{CLAUDE_AGENT_MAX_MESSAGES} > 0) {
+        $max_iterations = $ENV{CLAUDE_AGENT_MAX_MESSAGES};
+        if ($max_iterations > $max_allowed) {
+            warn "[WARNING] CLAUDE_AGENT_MAX_MESSAGES=$max_iterations exceeds maximum ($max_allowed), using $max_allowed\n";
+            $max_iterations = $max_allowed;
+        }
+    }
     my $iterations = 0;
     while (my $msg = $self->receive) {
+        $iterations++;
         push @messages, $msg;
         last if $msg->isa('Claude::Agent::Message::Result');
-        $iterations++;
         if ($iterations >= $max_iterations) {
-            warn "receive_until_result: exceeded max iterations ($max_iterations), breaking loop\n";
+            warn "receive_until_result: processed max messages ($max_iterations), breaking loop. "
+                . "Set CLAUDE_AGENT_MAX_MESSAGES to increase limit.\n";
             last;
         }
     }
@@ -213,11 +225,11 @@ sub send {
 
     Claude::Agent::Error->throw(message => 'Not connected') unless $self->_connected;
     Claude::Agent::Error->throw(message => 'No active query') unless $self->_query;
-    Claude::Agent::Error->throw(message => 'Query has finished')
-        if $self->_query->is_finished;
+    # Note: We intentionally do NOT pre-check is_finished here due to race conditions.
+    # The try/catch block below handles the case where query finishes between any
+    # check and the actual write operation, providing robust error handling.
 
     # Attempt to send the message, catching write errors gracefully
-    # In async contexts, the query may finish between the check above and the write
     require Try::Tiny;
     my $write_error;
     my $original_exception;

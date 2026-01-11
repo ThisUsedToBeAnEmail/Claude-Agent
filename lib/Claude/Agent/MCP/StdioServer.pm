@@ -14,6 +14,9 @@ use Marlin
 sub BUILD {
     my ($self) = @_;
     die "Command must be absolute path" unless $self->command =~ m{^/};
+    require Cwd;
+    my $canon = Cwd::abs_path($self->command);
+    die "Invalid command path" unless $canon && $canon =~ m{^/};
 
     # Validate args to prevent command injection via shell metacharacters
     # Args are passed to execve() not through shell, but some programs may

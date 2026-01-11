@@ -81,6 +81,22 @@ sub socket_path {
 
 Returns a hashref suitable for use as a stdio MCP server config.
 
+B<Security Note:> The PERL5LIB environment variable is automatically
+filtered from @INC paths to include only known safe Perl library directories.
+However, symlinks within permitted directory prefixes are allowed. In
+high-security or multi-tenant environments where attackers could create
+symlinks within allowed directories (e.g., /Users/attacker/perl5/), set
+PERL5LIB explicitly rather than relying on automatic @INC filtering.
+
+B<RECOMMENDATION for high-security environments:>
+
+    # Instead of relying on automatic @INC filtering:
+    $ENV{PERL5LIB} = '/path/to/trusted/lib:/path/to/other/lib';
+
+This explicit approach avoids potential symlink-based attacks within
+permitted directory prefixes that could be exploited in multi-tenant
+environments.
+
 =cut
 
 sub to_stdio_config {
@@ -122,15 +138,19 @@ sub to_stdio_config {
             # Security: abs_path resolves symlinks, but paths within allowed prefixes
             # could still contain symlinks. The allowlist restricts to known Perl lib
             # directories where symlink attacks are less likely to be meaningful.
-            # WARNING: Symlinks within allowed prefixes are not detected and could
-            # potentially point to unexpected locations. Consider additional validation
-            # if running in untrusted environments.
+            # WARNING: Symlinks within allowed prefixes are permitted.
+            # For untrusted environments, set PERL5LIB explicitly.
+            # KNOWN LIMITATION: This is documented behavior - symlinks within allowed
+            # directories are permitted. Additional lstat-based validation was considered
+            # but rejected due to complexity and limited security benefit in typical usage.
             PERL5LIB => join(':', grep {
                 my $path = $_;
                 # Must be defined, absolute, and an existing directory
                 defined $path && $path =~ m{^/} && -d $path && do {
                     require Cwd;
                     my $real = Cwd::abs_path($path);
+                    # Verify canonicalized path doesn't escape allowed prefixes
+                    $real = File::Spec->canonpath($real) if $real;
                     # Double-check the resolved path exists
                     defined $real && $real =~ m{^/} && -d $real
                         # Use File::Spec->no_upwards equivalent check on path components
@@ -160,6 +180,12 @@ sub to_stdio_config {
 =head2 start
 
 Start listening on the Unix socket for tool call requests.
+
+B<Concurrent Request Handling:> When multiple connections send requests
+concurrently, responses may be interleaved and delivered in any order.
+Clients MUST correlate responses using the C<id> field from each response,
+which matches the C<id> from the corresponding request. Do not assume
+responses arrive in request order.
 
 =cut
 

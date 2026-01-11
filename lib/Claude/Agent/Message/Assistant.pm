@@ -51,10 +51,22 @@ B<Note:> Results are cached on first access. If the underlying message content
 is modified after this method is called, the cached value will be returned
 on subsequent calls. Messages are typically immutable after creation.
 
-B<Warning:> The returned arrayref is a shallow copy - the Content objects
-inside are shared with the cache. Modifying these objects in place will
-affect all subsequent calls to content_blocks(). Treat returned objects
-as read-only, or clone them if mutation is required.
+B<Warning - Shared Object References:> The returned arrayref is a shallow copy,
+but the Content objects inside are shared with the internal cache. This means:
+
+=over 4
+
+=item * Mutating a Content object affects ALL code holding references to it
+
+=item * Subsequent calls to content_blocks() return the same (mutated) objects
+
+=item * This can cause subtle bugs if Content objects are modified in place
+
+=back
+
+B<Recommended:> Treat returned Content objects as read-only. If you need to
+modify content, create deep copies of the objects first using appropriate
+cloning methods.
 
 =head3 text
 
@@ -87,7 +99,8 @@ sub content_blocks {
     } @$raw;
 
     $self->_content_blocks_cache(\@blocks);
-    # Note: Returns shallow copy of array; objects inside are shared
+    # WARNING: Objects are shared - mutations affect cached state
+    # Use Storable::dclone() if you need to modify returned objects
     return [@{$self->_content_blocks_cache}];
 }
 

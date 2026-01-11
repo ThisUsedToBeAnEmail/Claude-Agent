@@ -1,5 +1,15 @@
 Revision history for Claude-Agent
 
+0.06    2026-01-10
+        - Added Perl hook execution via Claude::Agent::Hook::Executor
+        - Hooks now execute in-process (PreToolUse, PostToolUse, PostToolUseFailure)
+        - Added dry-run mode (dry_run option) to preview changes without executing
+        - New Claude::Agent::DryRun module for write-tool interception
+        - on_dry_run callback for custom dry-run handling
+        - Improved hook system integration in Query.pm
+        - Updated examples/03-hooks.pl to demonstrate working Perl hooks
+        - New examples/04-dry-run.pl for dry-run mode demonstration
+
 0.05    2026-01-10
         - Added Claude::Agent::Code::Review module for AI-powered code review
         - Perl::Critic integration for deterministic static analysis

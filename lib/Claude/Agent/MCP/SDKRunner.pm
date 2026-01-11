@@ -364,15 +364,18 @@ sub call_parent_handler {
     # Wait for response with configurable timeout using actual elapsed time
     require Time::HiRes;
     my $timeout = $ENV{CLAUDE_AGENT_TOOL_TIMEOUT} // 60;
-    # Ensure numeric value between 1-3600 seconds (1 sec to 1 hour)
+    # Ensure numeric value between 1-300 seconds (1 sec to 5 minutes)
     # Non-numeric, empty, zero, or out-of-range values fall back to 60s default
-    # Security note: High timeout values (e.g., 3600) can tie up system resources
-    # for extended periods. Consider using conservative values in production.
-    if (!defined $timeout || $timeout !~ /^\d+$/ || $timeout < 1 || $timeout > 3600) {
+    # Security note: Lower maximum (300s) prevents resource exhaustion attacks.
+    # For operations requiring longer timeouts, consider breaking them into smaller steps.
+    if (!defined $timeout || $timeout !~ /^\d+$/ || $timeout < 1 || $timeout > 300) {
         $timeout = 60;
     }
     my $start_time = Time::HiRes::time();
     my $backoff = 0.1;
+    my $last_buffer_size = length($state->{response_buffer});
+    my $stall_count = 0;
+    my $max_stall_iterations = 100;  # ~10 seconds at max backoff before declaring stall
 
     while (!$state->{got_response}) {
         # Check elapsed time before loop_once to ensure accurate timeout enforcement
@@ -382,17 +385,62 @@ sub call_parent_handler {
         $state->{loop}->loop_once($backoff);
         $backoff = $backoff * 1.5 if $backoff < 1.0;  # Exponential backoff up to 1 second
 
+        # Detect buffer growth without complete JSON lines (malformed/incomplete data)
+        my $current_buffer_size = length($state->{response_buffer});
+        my $max_buffer_size = 10_000_000;  # 10MB hard limit
+        if ($current_buffer_size > $max_buffer_size) {
+            warn "SDKRunner: Buffer overflow (size: $current_buffer_size), aborting\n"
+                if $ENV{CLAUDE_AGENT_DEBUG};
+            last;
+        }
+        if ($current_buffer_size > 0 && $current_buffer_size == $last_buffer_size) {
+            $stall_count++;
+            if ($stall_count >= $max_stall_iterations) {
+                warn "SDKRunner: Buffer stalled with incomplete data (size: $current_buffer_size)\n"
+                    if $ENV{CLAUDE_AGENT_DEBUG};
+                last;
+            }
+        } elsif ($current_buffer_size != $last_buffer_size) {
+            # Buffer changed - reset stall counter but don't reset backoff
+            $stall_count = 0;
+            $last_buffer_size = $current_buffer_size;
+        }
+
         # Re-check elapsed time after loop_once in case it took longer than expected
         last if (Time::HiRes::time() - $start_time) >= $timeout;
     }
 
-    # Extract the response line from buffer
+    # Extract the response line from buffer, matching by request ID
     my $response_line;
-    if ($state->{response_buffer} =~ s/^(.+)\n//) {
-        $response_line = $1;
-        # Reset flag if no more complete lines
-        $state->{got_response} = 0 unless $state->{response_buffer} =~ /\n/;
+    # Parse all complete lines and find matching response by ID
+    # Buffer unmatched responses for other pending requests
+    my @unmatched_lines;
+    while ($state->{response_buffer} =~ s/^(.+)\n//) {
+        my $line = $1;
+        my ($resp, $parse_err);
+        try {
+            ($resp) = $state->{jsonl}->decode($line);
+        } catch {
+            $parse_err = $_;
+        };
+        if ($parse_err || !$resp) {
+            # Keep unparseable lines for debugging, but don't block
+            warn "SDKRunner: Failed to parse buffered line: $line\n" if $ENV{CLAUDE_AGENT_DEBUG};
+            next;
+        }
+        if ($resp->{id} && $resp->{id} eq $request_id) {
+            $response_line = $line;
+            last;
+        }
+        # Buffer unmatched responses for other pending requests
+        push @unmatched_lines, $line;
     }
+    # Restore unmatched lines to buffer (prepend so they're processed first next time)
+    if (@unmatched_lines) {
+        $state->{response_buffer} = join("\n", @unmatched_lines) . "\n" . $state->{response_buffer};
+    }
+    # Reset flag if no more complete lines
+    $state->{got_response} = 0 unless $state->{response_buffer} =~ /\n/;
 
     unless ($response_line) {
         warn "SDKRunner: No response from parent (timeout)\n" if $ENV{CLAUDE_AGENT_DEBUG};
