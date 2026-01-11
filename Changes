@@ -1,5 +1,8 @@
 Revision history for Claude-Agent
 
+0.12    2026-01-11
+	- fix utf8 print bug
+
 0.11    2026-01-11
         [Session Support]
         - Added session() export for multi-turn conversations

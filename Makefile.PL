@@ -35,7 +35,7 @@ my %WriteMakefileArgs = (
         # CLI utilities (Claude::Agent::CLI)
         'Term::Choose'          => '1.7',
         'Term::ReadKey'         => '2.38',
-        'Term::ProgressSpinner' => '1.0',
+        'Term::ProgressSpinner' => '1.02',
     },
     META_MERGE => {
         'meta-spec' => { version => 2 },
