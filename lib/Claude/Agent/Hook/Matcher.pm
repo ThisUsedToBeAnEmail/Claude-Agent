@@ -4,6 +4,7 @@ use 5.020;
 use strict;
 use warnings;
 
+use Claude::Agent::Logger '$log';
 use Try::Tiny;
 use Types::Common -types;
 use Marlin
@@ -148,7 +149,7 @@ sub run_hooks {
 
         if ($hook_error) {
             # Log full error for debugging, return sanitized message
-            warn "Hook error: $hook_error" if $ENV{CLAUDE_AGENT_DEBUG};
+            $log->debug("Hook error: %s", $hook_error);
             push @results, {
                 decision => 'error',
                 error    => 'Hook execution failed',

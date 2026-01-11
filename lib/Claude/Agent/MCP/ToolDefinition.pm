@@ -4,6 +4,7 @@ use 5.020;
 use strict;
 use warnings;
 
+use Claude::Agent::Logger '$log';
 use Types::Common -types;
 use Marlin
     'name!'         => Str,
@@ -82,7 +83,7 @@ sub execute {
     my $result = eval { $self->handler->($args) };
     if ($@) {
         # Log full error for debugging but return generic message to avoid leaking sensitive info
-        warn "Tool execution error: $@" if $ENV{CLAUDE_AGENT_DEBUG};
+        $log->debug("Tool execution error: %s", $@);
         return {
             content  => [{ type => 'text', text => "Error executing tool: " . $self->name }],
             is_error => 1,

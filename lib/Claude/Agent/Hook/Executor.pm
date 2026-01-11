@@ -4,6 +4,7 @@ use 5.020;
 use strict;
 use warnings;
 
+use Claude::Agent::Logger '$log';
 use Types::Common -types;
 use Scalar::Util qw(blessed);
 use Try::Tiny;
@@ -260,20 +261,18 @@ sub _run_hooks {
             next unless ref($result) eq 'HASH' && $result->{decision};
 
             if ($result->{decision} eq 'deny') {
-                warn "[HOOK] PreToolUse: DENIED $tool_name - " . ($result->{reason} // 'no reason') . "\n"
-                    if $ENV{CLAUDE_AGENT_DEBUG};
+                $log->info("[HOOK] PreToolUse: DENIED %s - %s",
+                    $tool_name, $result->{reason} // 'no reason');
                 return $result;
             }
             elsif ($result->{decision} eq 'allow') {
-                warn "[HOOK] PreToolUse: ALLOWED $tool_name" .
-                    ($result->{updated_input} ? ' (with modifications)' : '') . "\n"
-                    if $ENV{CLAUDE_AGENT_DEBUG};
+                $log->debug("[HOOK] PreToolUse: ALLOWED %s%s",
+                    $tool_name, $result->{updated_input} ? ' (with modifications)' : '');
                 return $result;
             }
             elsif ($result->{decision} eq 'error') {
-                warn "[HOOK] PreToolUse: ERROR in hook for $tool_name - " .
-                    ($result->{error} // 'unknown error') . "\n"
-                    if $ENV{CLAUDE_AGENT_DEBUG};
+                $log->warning("[HOOK] PreToolUse: ERROR in hook for %s - %s",
+                    $tool_name, $result->{error} // 'unknown error');
                 # Continue on error, don't block
             }
             # 'continue' - keep checking other matchers

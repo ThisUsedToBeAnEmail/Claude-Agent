@@ -4,6 +4,7 @@ use 5.020;
 use strict;
 use warnings;
 
+use Claude::Agent::Logger '$log';
 use IO::Socket::UNIX;
 use IO::Async::Loop;
 use IO::Async::Stream;
@@ -123,7 +124,7 @@ sub run {
 
     $state->{socket}->autoflush(1);
 
-    warn "SDKRunner: Connected to $socket_path\n" if $ENV{CLAUDE_AGENT_DEBUG};
+    $log->debug("SDKRunner: Connected to %s", $socket_path);
 
     # Create IO::Async event loop
     $state->{loop} = IO::Async::Loop->new;
@@ -152,7 +153,7 @@ sub run {
                 my $line = $1;
                 next unless length $line;
 
-                warn "SDKRunner: Received: $line\n" if $ENV{CLAUDE_AGENT_DEBUG};
+                $log->trace("SDKRunner: Received: %s", $line);
 
                 my @requests;
                 my $parse_error;
@@ -162,7 +163,7 @@ sub run {
                     $parse_error = $_;
                 };
                 if ($parse_error) {
-                    warn "SDKRunner: Failed to parse JSON: $parse_error\n";
+                    $log->warning("SDKRunner: Failed to parse JSON: %s", $parse_error);
                     next;
                 }
 
@@ -173,7 +174,7 @@ sub run {
 
                     if ($response) {
                         my $json = $state->{jsonl}->encode([$response]);
-                        warn "SDKRunner: Sending: $json\n" if $ENV{CLAUDE_AGENT_DEBUG};
+                        $log->trace("SDKRunner: Sending: %s", $json);
                         print $json;
                         STDOUT->flush();
                     }
@@ -182,12 +183,12 @@ sub run {
             return 0;
         },
         on_read_eof => sub {
-            warn "SDKRunner: STDIN closed (EOF)\n" if $ENV{CLAUDE_AGENT_DEBUG};
+            $log->debug("SDKRunner: STDIN closed (EOF)");
             $shutdown->();
         },
         on_read_error => sub {
             my ($stream, $errno) = @_;
-            warn "SDKRunner: STDIN read error: $errno\n" if $ENV{CLAUDE_AGENT_DEBUG};
+            $log->debug("SDKRunner: STDIN read error: %s", $errno);
             $shutdown->();
         },
     );
@@ -210,12 +211,12 @@ sub run {
             return 0;
         },
         on_read_eof => sub {
-            warn "SDKRunner: Socket closed by parent\n" if $ENV{CLAUDE_AGENT_DEBUG};
+            $log->debug("SDKRunner: Socket closed by parent");
             $shutdown->();
         },
         on_read_error => sub {
             my ($stream, $errno) = @_;
-            warn "SDKRunner: Socket error: $errno\n" if $ENV{CLAUDE_AGENT_DEBUG};
+            $log->debug("SDKRunner: Socket error: %s", $errno);
             $shutdown->();
         },
     );
@@ -354,7 +355,7 @@ sub call_parent_handler {
         args => $args,
     }]);
 
-    warn "SDKRunner: Sending to parent: $request\n" if $ENV{CLAUDE_AGENT_DEBUG};
+    $log->trace("SDKRunner: Sending to parent: %s", $request);
 
     $state->{socket_stream}->write($request);
 
@@ -389,15 +390,14 @@ sub call_parent_handler {
         my $current_buffer_size = length($state->{response_buffer});
         my $max_buffer_size = 10_000_000;  # 10MB hard limit
         if ($current_buffer_size > $max_buffer_size) {
-            warn "SDKRunner: Buffer overflow (size: $current_buffer_size), aborting\n"
-                if $ENV{CLAUDE_AGENT_DEBUG};
+            $log->debug("SDKRunner: Buffer overflow (size: %d), aborting", $current_buffer_size);
             last;
         }
         if ($current_buffer_size > 0 && $current_buffer_size == $last_buffer_size) {
             $stall_count++;
             if ($stall_count >= $max_stall_iterations) {
-                warn "SDKRunner: Buffer stalled with incomplete data (size: $current_buffer_size)\n"
-                    if $ENV{CLAUDE_AGENT_DEBUG};
+                $log->debug("SDKRunner: Buffer stalled with incomplete data (size: %d)",
+                    $current_buffer_size);
                 last;
             }
         } elsif ($current_buffer_size != $last_buffer_size) {
@@ -425,7 +425,7 @@ sub call_parent_handler {
         };
         if ($parse_err || !$resp) {
             # Keep unparseable lines for debugging, but don't block
-            warn "SDKRunner: Failed to parse buffered line: $line\n" if $ENV{CLAUDE_AGENT_DEBUG};
+            $log->trace("SDKRunner: Failed to parse buffered line: %s", $line);
             next;
         }
         if ($resp->{id} && $resp->{id} eq $request_id) {
@@ -443,14 +443,14 @@ sub call_parent_handler {
     $state->{got_response} = 0 unless $state->{response_buffer} =~ /\n/;
 
     unless ($response_line) {
-        warn "SDKRunner: No response from parent (timeout)\n" if $ENV{CLAUDE_AGENT_DEBUG};
+        $log->debug("SDKRunner: No response from parent (timeout)");
         return {
             content => [{ type => 'text', text => 'No response from handler (timeout)' }],
             isError => \1,
         };
     }
 
-    warn "SDKRunner: Received from parent: $response_line\n" if $ENV{CLAUDE_AGENT_DEBUG};
+    $log->trace("SDKRunner: Received from parent: %s", $response_line);
 
     my ($response, $parse_error);
     try {
@@ -459,7 +459,7 @@ sub call_parent_handler {
         $parse_error = $_;
     };
     if ($parse_error) {
-        warn "SDKRunner: Failed to parse response: $parse_error" if $ENV{CLAUDE_AGENT_DEBUG};
+        $log->debug("SDKRunner: Failed to parse response: %s", $parse_error);
         return {
             content => [{ type => 'text', text => 'Failed to parse handler response' }],
             isError => \1,

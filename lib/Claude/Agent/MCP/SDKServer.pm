@@ -4,6 +4,7 @@ use 5.020;
 use strict;
 use warnings;
 
+use Claude::Agent::Logger '$log';
 use Errno qw(ENOENT);
 use IO::Socket::UNIX;
 use JSON::Lines;
@@ -255,7 +256,7 @@ sub _handle_request {
     };
 
     if ($parse_error) {
-        warn "SDKServer: Failed to parse request: $parse_error\n" if $ENV{CLAUDE_AGENT_DEBUG};
+        $log->debug("SDKServer: Failed to parse request: %s", $parse_error);
         # Use generic error message to avoid leaking sensitive data
         my $error_response = $self->_jsonl->encode([{
             id      => undef,
@@ -271,7 +272,7 @@ sub _handle_request {
         my $args      = $request->{args} // {};
         my $request_id = $request->{id};
 
-        warn "SDKServer: Executing tool '$tool_name'\n" if $ENV{CLAUDE_AGENT_DEBUG};
+        $log->debug("SDKServer: Executing tool '%s'", $tool_name);
 
         # Find and execute the tool
         my $tool = $self->server->get_tool($tool_name);
@@ -335,8 +336,8 @@ sub stop {
     # Unlink unconditionally - log non-ENOENT errors for debugging but don't die
     # This is consistent with start() error handling
     if (!unlink($self->_socket_path) && $! != ENOENT) {
-        warn "SDKServer: Could not remove socket during stop: " . $self->_socket_path . ": $!\n"
-            if $ENV{CLAUDE_AGENT_DEBUG};
+        $log->debug("SDKServer: Could not remove socket during stop: %s: %s",
+            $self->_socket_path, $!);
     }
     return;
 }
@@ -347,7 +348,7 @@ sub DEMOLISH {
     try {
         $self->stop() if $self->loop;
     } catch {
-        warn "SDKServer DEMOLISH error: $_\n" if $ENV{CLAUDE_AGENT_DEBUG};
+        $log->debug("SDKServer DEMOLISH error: %s", $_);
     };
     return;
 }

@@ -4,6 +4,7 @@ use 5.020;
 use strict;
 use warnings;
 
+use Claude::Agent::Logger '$log';
 use Time::HiRes ();
 use Types::Common -types;
 use Marlin
@@ -26,10 +27,9 @@ use Marlin
             utf8     => 1,
             error_cb => sub {
                 my ($action, $error, $data) = @_;
-                # Only warn at debug level 2+ since parse errors are common
+                # Only log at trace level since parse errors are common
                 # with streaming JSON and partial data
-                warn "JSON::Lines $action error: $error"
-                    if $ENV{CLAUDE_AGENT_DEBUG} && $ENV{CLAUDE_AGENT_DEBUG} > 1;
+                $log->trace("JSON::Lines $action error: $error");
                 return;
             },
         )
@@ -133,7 +133,7 @@ sub BUILD {
             unshift @{$all_hooks{$event}}, @{$dry_run_hooks->{$event}};
         }
 
-        warn "DEBUG: Dry-run mode enabled\n" if $ENV{CLAUDE_AGENT_DEBUG};
+        $log->debug("Dry-run mode enabled");
         # Note: create_dry_run_hooks() emits its own prominent security warning
         # unless CLAUDE_AGENT_DRY_RUN_NO_WARN is set
     }
@@ -146,9 +146,8 @@ sub BUILD {
                 ($self->options->has_cwd ? (cwd => $self->options->cwd) : ()),
             )
         );
-        warn "DEBUG: Hook executor initialized with hooks for: " .
-            join(', ', keys %all_hooks) . "\n"
-            if $ENV{CLAUDE_AGENT_DEBUG};
+        $log->debug("Hook executor initialized with hooks for: %s",
+            join(', ', keys %all_hooks));
     }
 
     # Create SDKServer wrappers for SDK MCP servers
@@ -164,8 +163,8 @@ sub BUILD {
                 );
                 $sdk_server->start();
                 $self->_sdk_servers->{$name} = $sdk_server;
-                warn "DEBUG: Started SDK server '$name' on socket: " . $sdk_server->socket_path . "\n"
-                    if $ENV{CLAUDE_AGENT_DEBUG};
+                $log->debug("Started SDK server '%s' on socket: %s",
+                    $name, $sdk_server->socket_path);
             }
         }
     }
@@ -354,10 +353,10 @@ sub _start_process {
 
     my @cmd = $self->_build_command();
 
-    if ($ENV{CLAUDE_AGENT_DEBUG}) {
+    if ($log->is_debug) {
         my @safe_cmd = map { $_ =~ /^--/ ? $_ : '[REDACTED]' } @cmd[0..2];
         push @safe_cmd, '...' if @cmd > 3;
-        warn "DEBUG: Running command: @safe_cmd (full args redacted)\n";
+        $log->debug("Running command: %s (full args redacted)", "@safe_cmd");
     }
 
     my $process = IO::Async::Process->new(
@@ -378,7 +377,7 @@ sub _start_process {
                 my ($stream, $buffref) = @_;
                 # Log stderr but don't treat as fatal
                 while ($$buffref =~ s/^([^\n]+)\n//) {
-                    warn "Claude CLI stderr: $1\n" if $ENV{CLAUDE_AGENT_DEBUG};
+                    $log->debug("Claude CLI stderr: %s", $1);
                 }
                 return 0;
             },
@@ -424,13 +423,13 @@ sub _handle_line {
 
     # Use JSON::Lines decode method for single line
     my @decoded = $self->_jsonl->decode($line);
-    if ($ENV{CLAUDE_AGENT_DEBUG} && $ENV{CLAUDE_AGENT_DEBUG} > 1) {
-        warn "DEBUG: Raw line length: " . length($line) . "\n";
-        warn "DEBUG: Raw line: $line\n";
-        warn "DEBUG: Decoded " . scalar(@decoded) . " objects\n";
-        warn "DEBUG: JSON::Lines buffer remaining: " . length($self->_jsonl->remaining) . " chars\n";
+    if ($log->is_trace) {
+        $log->trace("Raw line length: %d", length($line));
+        $log->trace("Raw line: %s", $line);
+        $log->trace("Decoded %d objects", scalar(@decoded));
+        $log->trace("JSON::Lines buffer remaining: %d chars", length($self->_jsonl->remaining));
         if ($self->_jsonl->remaining) {
-            warn "DEBUG: Buffer content (first 200): " . substr($self->_jsonl->remaining, 0, 200) . "\n";
+            $log->trace("Buffer content (first 200): %s", substr($self->_jsonl->remaining, 0, 200));
         }
     }
 
@@ -442,31 +441,32 @@ sub _handle_line {
     my $min_threshold = 10_000;  # Minimum 10KB to accommodate larger legitimate messages
     my $max_threshold = 10_000_000;  # Hard cap at 10MB
     if (!defined $buffer_threshold || $buffer_threshold !~ /^\d+$/) {
-        warn "[WARNING] CLAUDE_AGENT_JSONL_BUFFER_MAX='$ENV{CLAUDE_AGENT_JSONL_BUFFER_MAX}' is not a valid integer, using default 100000\n"
+        $log->warning("CLAUDE_AGENT_JSONL_BUFFER_MAX='%s' is not a valid integer, using default 100000",
+            $ENV{CLAUDE_AGENT_JSONL_BUFFER_MAX} // '')
             if defined $ENV{CLAUDE_AGENT_JSONL_BUFFER_MAX};
         $buffer_threshold = 100_000;
     }
     elsif ($buffer_threshold < $min_threshold) {
-        warn "[WARNING] CLAUDE_AGENT_JSONL_BUFFER_MAX=$buffer_threshold is below minimum ($min_threshold), using $min_threshold. "
-            . "Very small values may truncate legitimate large tool results.\n";
+        $log->warning("CLAUDE_AGENT_JSONL_BUFFER_MAX=%d is below minimum (%d), using %d. "
+            . "Very small values may truncate legitimate large tool results.",
+            $buffer_threshold, $min_threshold, $min_threshold);
         $buffer_threshold = $min_threshold;
     }
     elsif ($buffer_threshold > $max_threshold) {
-        warn "[WARNING] CLAUDE_AGENT_JSONL_BUFFER_MAX=$buffer_threshold exceeds maximum ($max_threshold), using $max_threshold\n"
-            if $ENV{CLAUDE_AGENT_DEBUG};
+        $log->debug("CLAUDE_AGENT_JSONL_BUFFER_MAX=%d exceeds maximum (%d), using %d",
+            $buffer_threshold, $max_threshold, $max_threshold);
         $buffer_threshold = $max_threshold;
     }
 
     # Check buffer size regardless of decode success to prevent unbounded growth
     if ($self->_jsonl->remaining && length($self->_jsonl->remaining) > $buffer_threshold) {
-        warn "JSON::Lines buffer overflow detected (size: " . length($self->_jsonl->remaining) .
-             ", threshold: $buffer_threshold), reinitializing\n" if $ENV{CLAUDE_AGENT_DEBUG};
+        $log->debug("JSON::Lines buffer overflow detected (size: %d, threshold: %d), reinitializing",
+            length($self->_jsonl->remaining), $buffer_threshold);
         $self->_jsonl(JSON::Lines->new(
             utf8     => 1,
             error_cb => sub {
                 my ($action, $error, $data) = @_;
-                warn "JSON::Lines $action error: $error"
-                    if $ENV{CLAUDE_AGENT_DEBUG} && $ENV{CLAUDE_AGENT_DEBUG} > 1;
+                $log->trace("JSON::Lines %s error: %s", $action, $error);
                 return;
             },
         ));
@@ -475,16 +475,15 @@ sub _handle_line {
     return unless @decoded;
 
     for my $data (@decoded) {
-        if ($ENV{CLAUDE_AGENT_DEBUG} && $ENV{CLAUDE_AGENT_DEBUG} > 1) {
-            warn "DEBUG: Decoded item ref type: " . (ref($data) // "not a ref") . "\n";
+        if ($log->is_trace) {
+            $log->trace("Decoded item ref type: %s", ref($data) // "not a ref");
             if (ref $data eq 'HASH') {
-                warn "DEBUG: Hash keys: " . join(", ", keys %$data) . "\n";
+                $log->trace("Hash keys: %s", join(", ", keys %$data));
             }
         }
         next unless defined $data && ref $data eq 'HASH';
-        if ($ENV{CLAUDE_AGENT_DEBUG} && $ENV{CLAUDE_AGENT_DEBUG} > 1) {
-            warn "DEBUG: Message type in data: " . ($data->{type} // "undef") . "\n";
-        }
+        $log->trace("Message type in data: %s", $data->{type} // "undef")
+            if $log->is_trace;
         next unless exists $data->{type};  # Skip malformed/partial JSON data
 
         my $msg = Claude::Agent::Message->from_json($data);
@@ -550,9 +549,8 @@ sub _execute_hooks_for_message {
                     );
 
                     if ($result->{decision} eq 'deny') {
-                        warn "[HOOK] Blocked tool: $tool_name - " .
-                            ($result->{reason} // 'denied by hook') . "\n"
-                            if $ENV{CLAUDE_AGENT_DEBUG};
+                        $log->info("[HOOK] Blocked tool: %s - %s",
+                            $tool_name, $result->{reason} // 'denied by hook');
 
                         # Send permission denial to CLI
                         $self->respond_to_permission($tool_use_id, {
@@ -564,8 +562,7 @@ sub _execute_hooks_for_message {
                         delete $self->_pending_tool_uses->{$tool_use_id};
                     }
                     elsif ($result->{decision} eq 'allow' && $result->{updated_input}) {
-                        warn "[HOOK] Modified tool input for: $tool_name\n"
-                            if $ENV{CLAUDE_AGENT_DEBUG};
+                        $log->debug("[HOOK] Modified tool input for: %s", $tool_name);
 
                         # Send permission with modified input
                         $self->respond_to_permission($tool_use_id, {
@@ -633,7 +630,7 @@ sub _resolve_pending_futures_on_finish {
         try {
             $sdk_server->stop();
         } catch {
-            warn "Failed to stop SDK server: $_" if $ENV{CLAUDE_AGENT_DEBUG};
+            $log->debug("Failed to stop SDK server: %s", $_);
         };
     }
     return;
@@ -670,8 +667,8 @@ sub next {
     my $timeout = $self->options->query_timeout // 600;
     my $max_timeout = 3600;  # 1 hour maximum
     if (!defined $timeout || $timeout <= 0 || $timeout > $max_timeout) {
-        warn "Invalid query_timeout value ($timeout), using default 600 seconds\n"
-            if $has_timeout && defined $timeout && $timeout != 600 && $ENV{CLAUDE_AGENT_DEBUG};
+        $log->debug("Invalid query_timeout value (%s), using default 600 seconds", $timeout // 'undef')
+            if $has_timeout && defined $timeout && $timeout != 600;
         $timeout = 600;
     }
     my $start_time = Time::HiRes::time();
@@ -812,7 +809,7 @@ sub send_user_message {
     try {
         $result = $self->_stdin->write($msg);
     } catch {
-        warn "send_user_message write error: $_" if $ENV{CLAUDE_AGENT_DEBUG};
+        $log->debug("send_user_message write error: %s", $_);
         $result = 0;
     };
     return $result;
@@ -838,7 +835,7 @@ sub set_permission_mode {
     try {
         $self->_stdin->write($msg);
     } catch {
-        warn "set_permission_mode write error: $_" if $ENV{CLAUDE_AGENT_DEBUG};
+        $log->debug("set_permission_mode write error: %s", $_);
     };
     return;
 }

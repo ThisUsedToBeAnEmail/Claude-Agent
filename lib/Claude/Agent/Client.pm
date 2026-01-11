@@ -4,6 +4,7 @@ use 5.020;
 use strict;
 use warnings;
 
+use Claude::Agent::Logger '$log';
 use Types::Common -types;
 use Marlin
     'options'      => sub { Claude::Agent::Options->new() },
@@ -188,7 +189,8 @@ sub receive_until_result {
     if (defined $ENV{CLAUDE_AGENT_MAX_MESSAGES} && $ENV{CLAUDE_AGENT_MAX_MESSAGES} =~ /^\d+$/ && $ENV{CLAUDE_AGENT_MAX_MESSAGES} > 0) {
         $max_iterations = $ENV{CLAUDE_AGENT_MAX_MESSAGES};
         if ($max_iterations > $max_allowed) {
-            warn "[WARNING] CLAUDE_AGENT_MAX_MESSAGES=$max_iterations exceeds maximum ($max_allowed), using $max_allowed\n";
+            $log->warning("CLAUDE_AGENT_MAX_MESSAGES=%d exceeds maximum (%d), using %d",
+                $max_iterations, $max_allowed, $max_allowed);
             $max_iterations = $max_allowed;
         }
     }
@@ -198,15 +200,14 @@ sub receive_until_result {
         push @messages, $msg;
         last if $msg->isa('Claude::Agent::Message::Result');
         if ($iterations >= $max_iterations) {
-            warn "receive_until_result: processed max messages ($max_iterations), breaking loop. "
-                . "Set CLAUDE_AGENT_MAX_MESSAGES to increase limit.\n";
+            $log->warning("receive_until_result: processed max messages (%d), breaking loop. "
+                . "Set CLAUDE_AGENT_MAX_MESSAGES to increase limit.", $max_iterations);
             last;
         }
     }
     # Check if we exited without a Result (connection dropped)
     if (@messages && !$messages[-1]->isa('Claude::Agent::Message::Result')) {
-        warn "receive_until_result: connection closed without Result message\n"
-            if $ENV{CLAUDE_AGENT_DEBUG};
+        $log->debug("receive_until_result: connection closed without Result message");
     }
     return wantarray ? @messages : \@messages;
 }
@@ -240,7 +241,7 @@ sub send {
         $original_exception = $_;
         # Stringify for logging but preserve original for re-throw
         $write_error = ref($_) ? "$_" : $_;
-        warn "Client::send write error: $write_error\n" if $ENV{CLAUDE_AGENT_DEBUG};
+        $log->debug("Client::send write error: %s", $write_error);
     };
 
     # If write failed and query is now finished, throw appropriate error

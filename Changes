@@ -1,5 +1,13 @@
 Revision history for Claude-Agent
 
+0.07    2026-01-11
+        - Added configurable logging system via Log::Any
+        - New Claude::Agent::Logger module for default adapter setup
+        - Environment variables: CLAUDE_AGENT_LOG_LEVEL, CLAUDE_AGENT_LOG_OUTPUT
+        - Backward compatible with CLAUDE_AGENT_DEBUG (1=debug, 2=trace)
+        - Users can configure their own Log::Any adapter for custom formatting
+        - Migrated all debug statements from warn to $log->debug/trace/info
+
 0.06    2026-01-10
         - Added Perl hook execution via Claude::Agent::Hook::Executor
         - Hooks now execute in-process (PreToolUse, PostToolUse, PostToolUseFailure)

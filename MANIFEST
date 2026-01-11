@@ -31,6 +31,7 @@ lib/Claude/Agent/Hook/Context.pm
 lib/Claude/Agent/Hook/Executor.pm
 lib/Claude/Agent/Hook/Matcher.pm
 lib/Claude/Agent/Hook/Result.pm
+lib/Claude/Agent/Logger.pm
 lib/Claude/Agent/MCP.pm
 lib/Claude/Agent/MCP/HeaderUtils.pm
 lib/Claude/Agent/MCP/HTTPServer.pm
@@ -71,6 +72,7 @@ t/09-client.t
 t/10-errors.t
 t/11-extended-coverage.t
 t/12-sdk-validation.t
+t/13-logger.t
 t/manifest.t
 t/pod-coverage.t
 t/pod.t
