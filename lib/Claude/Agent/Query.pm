@@ -450,12 +450,8 @@ sub _start_process {
 
     # For --print mode, prompt is in argv, stdin can be closed
     if (!ref($self->prompt)) {
-        # Schedule close only after confirming process is ready and stdin is writable
-        # Use watch_write_ready to ensure deterministic timing rather than arbitrary delay
         $self->_loop->later(sub {
-            return unless $self->_stdin;  # Guard against race condition
-            return if $self->_stdin->is_closed;  # Already closed
-            $self->_stdin->close_when_empty;
+            $self->_stdin->close_when_empty if $self->_stdin;
         });
     }
     # For ref prompts (streaming input), caller will send messages via send_user_message

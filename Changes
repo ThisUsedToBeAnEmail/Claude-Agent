@@ -1,6 +1,6 @@
 Revision history for Claude-Agent
 
-0.09    2026-01-11
+0.10    2026-01-11
         [Socket Lifecycle]
         - Added cleanup() method to Query for explicit socket cleanup
         - Fixes socket accumulation in iteration loops (e.g., refactor_until_clean)
