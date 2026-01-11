@@ -514,18 +514,7 @@ sub status {
     );
     my $color = $colors{$type} // 'white';
     my $icon  = $icons{$type} // '*';
-    my $output = colored([$color], "$icon $message") . "\n";
-    # Encode if STDOUT doesn't have a UTF-8 layer (e.g., redirected to scalar in tests)
-    if (!_stdout_is_utf8()) {
-        utf8::encode($output) if utf8::is_utf8($output);
-    }
-    print $output;
-}
-
-# Check if STDOUT has a UTF-8 encoding layer
-sub _stdout_is_utf8 {
-    my @layers = PerlIO::get_layers(\*STDOUT);
-    return grep { /utf-?8/i } @layers;
+    print colored([$color], "$icon $message"), "\n";
 }
 
 =head2 Terminal Control
